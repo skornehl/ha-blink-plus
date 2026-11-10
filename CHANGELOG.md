@@ -2,6 +2,14 @@
 
 All notable changes to Blink Plus. The project follows [Semantic Versioning](https://semver.org/). It's pre-1.0, so options and behaviour may still change between minor versions.
 
+## [Unreleased]
+
+### Fixed
+- Blink Plus no longer fails to load when a Home Assistant update changes blinkpy's internals. The load reductions (see *Being nice to your Sync Module*) replace four blinkpy methods; a renamed class or method used to stop the whole integration at setup. Now each one is optional: if it can't be applied, Blink Plus logs a warning and keeps working with blinkpy's normal behaviour for that part.
+
+### Added
+- Diagnostics list which load reductions are active (`blinkpy_load_reductions`).
+
 ## [0.3.2] - 2026-10-22
 
 ### Fixed
