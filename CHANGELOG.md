@@ -15,6 +15,10 @@ All notable changes to Blink Plus. The project follows [Semantic Versioning](htt
 - A network error during a poll is a normal failed refresh (no "unexpected error" traceback).
 - The OAuth login hands its redirect-only connection back to the pool.
 - Live view: an IMMIS frame larger than 4 MB (stream out of sync) ends the session instead of being buffered.
+- Blink Plus no longer fails to load when a Home Assistant update changes blinkpy's internals. The load reductions (see *Being nice to your Sync Module*) replace four blinkpy methods; a renamed class or method used to stop the whole integration at setup. Now each one is optional: if it can't be applied, Blink Plus logs a warning and keeps working with blinkpy's normal behaviour for that part.
+
+### Added
+- Diagnostics list which load reductions are active (`blinkpy_load_reductions`).
 
 ## [0.3.2] - 2026-10-22
 

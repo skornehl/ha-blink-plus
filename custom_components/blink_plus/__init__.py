@@ -3,7 +3,6 @@
 from copy import deepcopy
 from datetime import timedelta
 import logging
-import time
 from typing import Any
 
 from blinkpy.blinkpy import Blink
@@ -43,6 +42,7 @@ from .const import (
 from .coordinator import BlinkConfigEntry, BlinkUpdateCoordinator
 from .archive import ClipArchiver
 from .auth import BlinkPlusAuth
+from .blinkpy_patches import apply_blinkpy_patches
 from .immis import BlinkLiveViewServer, live_key
 from .session import async_blink_session
 from .services import async_setup_services
@@ -130,7 +130,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: BlinkConfigEntry) -> boo
     blink.blink_plus_usb_poll_minutes = int(
         entry.options.get(CONF_USB_MOTION_MINUTES, DEFAULT_USB_MOTION_MINUTES)
     )
-    _patch_local_storage_uploads()
+    apply_blinkpy_patches()
     coordinator = BlinkUpdateCoordinator(hass, entry, blink)
 
     await coordinator.async_config_entry_first_refresh()
@@ -242,94 +242,6 @@ async def _async_options_updated(hass: HomeAssistant, entry: BlinkConfigEntry) -
     if dict(entry.options) == getattr(entry.runtime_data, "options_snapshot", None):
         return
     await hass.config_entries.async_reload(entry.entry_id)
-
-
-_PATCHED = False
-
-
-def _patch_local_storage_uploads() -> None:
-    """Stop blinkpy from uploading every new USB clip to the cloud on each poll.
-
-    blinkpy calls LocalStorageMediaItem.prepare_download() for each new clip in
-    the Sync Module 2 manifest, which makes the sync module upload it, one at a
-    time. That keeps the module "busy" (the app can't live view or play clips)
-    and isn't needed for motion detection, which only reads the manifest.
-    Only affects Blink Plus's own Blink instance, not the built-in integration.
-    """
-    global _PATCHED  # noqa: PLW0603
-    if _PATCHED:
-        return
-    try:
-        from blinkpy.sync_module import LocalStorageMediaItem  # noqa: PLC0415
-    except ImportError:
-        return
-    original = LocalStorageMediaItem.prepare_download
-
-    async def prepare_download(self, blink, *args, **kwargs):
-        if getattr(blink, "blink_plus_light_local_storage", False):
-            return None
-        return await original(self, blink, *args, **kwargs)
-
-    LocalStorageMediaItem.prepare_download = prepare_download
-
-    # Reading the USB clip list makes the sync module scan the drive, and while
-    # it does that the Blink app gets "system busy" when browsing saved clips.
-    from blinkpy.sync_module import BlinkSyncModule  # noqa: PLC0415
-
-    original_manifest = BlinkSyncModule.update_local_storage_manifest
-
-    async def update_local_storage_manifest(self, *args, **kwargs):
-        minutes = getattr(self.blink, "blink_plus_usb_poll_minutes", None)
-        if minutes is None:  # not ours (built-in Blink integration)
-            return await original_manifest(self, *args, **kwargs)
-        now = time.monotonic()
-        last = getattr(self, "_blink_plus_last_manifest", None)
-        if minutes <= 0 or (last is not None and now - last < minutes * 60):
-            self._local_storage["manifest_stale"] = True
-            return None
-        self._blink_plus_last_manifest = now
-        return await original_manifest(self, *args, **kwargs)
-
-    BlinkSyncModule.update_local_storage_manifest = update_local_storage_manifest
-
-    # blinkpy sends POST /network/{id}/update (a sync module *command*) on every
-    # poll and waits for it. The same armed/online state is already in the
-    # homescreen we fetch anyway, so read it from there.
-    original_network_info = BlinkSyncModule.get_network_info
-
-    async def get_network_info(self, *args, **kwargs):
-        if getattr(self.blink, "blink_plus_usb_poll_minutes", None) is None:
-            return await original_network_info(self, *args, **kwargs)
-        for net in (self.blink.homescreen or {}).get("networks", []) or []:
-            if str(net.get("id")) == str(self.network_id):
-                self.network_info = {
-                    "network": {
-                        "id": net.get("id"),
-                        "name": net.get("name"),
-                        "armed": net.get("armed"),
-                        "sync_module_error": False,
-                    }
-                }
-                return True
-        return await original_network_info(self, *args, **kwargs)
-
-    BlinkSyncModule.get_network_info = get_network_info
-
-    # blinkpy also asks every camera for live signal readings on each poll
-    # (GET /network/{n}/camera/{id}/signals). Temperature/battery/wifi are in
-    # the homescreen already.
-    from blinkpy.camera import BlinkCamera as _BlinkCamera  # noqa: PLC0415
-
-    original_sensor_info = _BlinkCamera.get_sensor_info
-
-    async def get_sensor_info(self, *args, **kwargs):
-        if getattr(self.sync.blink, "blink_plus_usb_poll_minutes", None) is None:
-            return await original_sensor_info(self, *args, **kwargs)
-        self.temperature_calibrated = self.temperature
-        return None
-
-    _BlinkCamera.get_sensor_info = get_sensor_info
-    _PATCHED = True
 
 
 @callback

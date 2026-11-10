@@ -1,7 +1,8 @@
 # Offline tests
 
 These run the live view engine (`immis.py`) against a fake Blink IMMIS relay
-(TLS) and real ffmpeg. You don't need a Blink account or Home Assistant. CI runs
+(TLS) and real ffmpeg, the clip archive against a fake Blink API, and the
+blinkpy load reductions against a fake blinkpy. You don't need a Blink account or Home Assistant. CI runs
 them on every push (`.github/workflows/validate.yml`).
 
 ```bash
@@ -16,4 +17,5 @@ python3 test_preempt.py . ../custom_components/blink_plus/immis.py            # 
 python3 test_failure.py . ../custom_components/blink_plus/immis.py            # silent camera: 1 attempt, STOP, cool-down
 python3 test_archive.py ../custom_components/blink_plus/archive.py            # clip archive: USB (no plan) + cloud (plan), retries, resume,
                                                                                # clips skipped after 3 failed runs, failed cloud clips, unload, no source
+python3 test_blinkpy_patches.py ../custom_components/blink_plus/blinkpy_patches.py  # load reductions: gated to Blink Plus, safe if blinkpy changed
 ```

@@ -239,6 +239,8 @@ A Blink Sync Module can only do **one job at a time**. If it's busy, the Blink a
 | Regular polling | Reads Blink's cloud homescreen only. No sync module commands, no per-camera signal requests, no USB clip uploads |
 | USB clip list | Not read unless you enable it |
 
+The polling savings come from replacing four blinkpy methods, only for Blink Plus's own connection (the built-in Blink integration is not affected). blinkpy ships with Home Assistant, so an HA update can change it. If one of these methods is gone, Blink Plus logs a warning like *"blinkpy has no … Blink Plus keeps working without this load reduction"* and uses blinkpy's normal behaviour for that part: everything still works, the sync module just gets a little more traffic. Diagnostics show which reductions are active (`blinkpy_load_reductions`).
+
 After you close a camera in HA, it's released within about **35 seconds** (HA keeps its player alive ~30 s, plus the 5 s linger). If the Blink app says busy right after you close a camera, wait that long.
 
 ## Entities, actions and attributes
@@ -300,7 +302,7 @@ logger:
     custom_components.blink_plus: debug
 ```
 
-**Settings → Devices & services → Blink Plus → ⋮ → Download diagnostics** gives each camera's live view state and the last 150 Blink API calls. Tokens, serials and email are redacted. Please attach it to [bug reports](https://github.com/akramercury/ha-blink-plus/issues/new/choose).
+**Settings → Devices & services → Blink Plus → ⋮ → Download diagnostics** gives each camera's live view state, the last 150 Blink API calls and which blinkpy load reductions are active. Tokens, serials and email are redacted. Please attach it to [bug reports](https://github.com/akramercury/ha-blink-plus/issues/new/choose).
 </details>
 
 ## Roadmap
