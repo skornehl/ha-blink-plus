@@ -55,3 +55,6 @@ jobs:
       - name: Clip archive (cloud + USB)
         working-directory: tests
         run: python3 test_archive.py ../custom_components/blink_plus/archive.py
+      - name: blinkpy load reductions (patched, gated, safe fallback)
+        working-directory: tests
+        run: python3 test_blinkpy_patches.py ../custom_components/blink_plus/blinkpy_patches.py

@@ -5,6 +5,7 @@ from typing import Any
 from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.core import HomeAssistant
 
+from .blinkpy_patches import apply_blinkpy_patches
 from .coordinator import BlinkConfigEntry
 
 TO_REDACT = {
@@ -46,5 +47,6 @@ async def async_get_config_entry_diagnostics(
         "config_entry": async_redact_data(config_entry.as_dict(), TO_REDACT),
         "cameras": async_redact_data(data, TO_REDACT),
         "live_view": live,
+        "blinkpy_load_reductions": apply_blinkpy_patches(),
         "blink_api_activity": list(getattr(api.auth, "activity", []))[-150:],
     }
