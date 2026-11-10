@@ -2,6 +2,20 @@
 
 All notable changes to Blink Plus. The project follows [Semantic Versioning](https://semver.org/). It's pre-1.0, so options and behaviour may still change between minor versions.
 
+## [0.3.3] - 2026-11-10
+
+### Fixed
+- Clip archive: a clip that keeps failing no longer blocks the archive. After 3 failed runs it is **skipped for good** (shown as `skipped_clips` on the Last archived clip sensor; `blink_plus.reset_archive` forgets it). Clips that failed before are tried last, so a few broken old clips can't keep newer ones from being copied, and the first full copy can complete.
+- Clip archive: a failed **cloud** clip is now counted and retried like a USB clip. Before, the first full copy could be marked complete with cloud clips missing.
+- Clip archive: auto-resume no longer starts a new series after giving up, until a run makes progress again. An account with no clip source at all reports the error once instead of retrying every 5 minutes.
+- Clip archive: unloading or reloading the entry stops the archiver. Before, a run still in progress could schedule a resume on the old instance.
+- Clip archive: a new run cancels a pending resume, and `next_auto_resume_s` is cleared when nothing is scheduled.
+- Clip archive: the clear "can't write to <folder>" message is no longer overwritten by the raw exception, and a failed refresh of the USB clip list no longer ends the whole run.
+- If setup fails after the live view servers started, their ports are freed, so the retry can bind them again.
+- A network error during a poll is a normal failed refresh (no "unexpected error" traceback).
+- The OAuth login hands its redirect-only connection back to the pool.
+- Live view: an IMMIS frame larger than 4 MB (stream out of sync) ends the session instead of being buffered.
+
 ## [0.3.2] - 2026-10-22
 
 ### Fixed

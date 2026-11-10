@@ -63,6 +63,7 @@ TOKEN_MODE_AUTO = "auto"  # use liveview_token, fall back to zeros if it fails
 TOKEN_MODE_TOKEN = "token"
 TOKEN_MODE_NULL = "null"
 
+MAX_FRAME = 4 * 1024 * 1024  # bytes; a larger IMMIS frame means a broken stream
 CLIENT_QUEUE_CHUNKS = 600  # about 10-20 s of video per client before we drop it
 FIRST_DATA_TIMEOUT = 30  # seconds to wait for first video after auth
 
@@ -660,6 +661,13 @@ class BlinkLiveViewServer:
                 length = int.from_bytes(header[5:9], "big")
                 if length <= 0:
                     continue
+                if length > MAX_FRAME:
+                    # Out of sync or garbage: don't try to buffer it, end the session.
+                    _LOGGER.warning(
+                        "%s: IMMIS frame of %d bytes, stream out of sync, closing",
+                        self.name, length,
+                    )
+                    return
                 payload = await reader.readexactly(length)
                 if msgtype != MSG_VIDEO or payload[0] != 0x47:
                     continue
