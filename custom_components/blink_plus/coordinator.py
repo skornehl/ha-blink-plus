@@ -92,6 +92,10 @@ class BlinkUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ) from ex
         except UnauthorizedError as ex:
             raise ConfigEntryAuthFailed("Blink API authorization failed") from ex
+        except ClientError as ex:
+            # Network/HTTP hiccup: a normal failed poll, not an "unexpected error"
+            # with a traceback.
+            raise UpdateFailed(f"Blink refresh failed: {ex}") from ex
         took = time.monotonic() - started
         if took > 60:
             _LOGGER.warning("Blink refresh took %.0f s", took)

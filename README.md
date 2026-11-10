@@ -139,6 +139,18 @@ The share now appears inside Home Assistant as `/media/blink`.
 
 Then press **Archive clips now** (on the *Blink Plus* device) for a first run, or wait for the schedule. **The first run into a folder copies everything** on the USB stick and in the cloud. After that only new clips are copied. Changed folders? The new folder gets its own full copy. To copy everything again into the same folder, run `blink_plus.reset_archive`. The **Last archived clip** sensor shows progress, counts, the last file and any error.
 
+**When a clip can't be copied** (sync module busy, clip list expired, Blink returns an error, the folder isn't writable), the run skips it and carries on. Runs resume by themselves: 2 min after a live view interrupted them, 5 min after an error, 30 s later when more clips are waiting. A clip that fails is retried in the next runs, after the clips that haven't failed yet. After **3 failed runs** it is skipped for good, so one broken clip can't hold up the rest (or keep the first full copy from finishing). `blink_plus.reset_archive` forgets skipped clips too. If no run makes progress after 12 automatic resumes, it waits for the next scheduled run. An account with neither cloud clips nor USB storage reports that once and isn't retried.
+
+| *Last archived clip* attribute | Meaning |
+|---|---|
+| `status` | `idle`, `running`, `running (first full copy)` |
+| `last_run` / `last_result` | When the last run ended and what it did (e.g. `done (cloud: 2 new)`, `paused: a live view started`, `error`) |
+| `saved_last_run` / `saved_total` | Clips copied in the last run / into this folder overall |
+| `last_clip_camera` / `last_clip_path` | Camera and file of the newest copied clip |
+| `last_error` | Why the last clip or run failed, e.g. `clip 123: download HTTP 500` or `can't write to /media/blink/...` |
+| `next_auto_resume_s` | Seconds until the next automatic resume, empty if none is scheduled |
+| `skipped_clips` | Clips skipped for good after 3 failed runs |
+
 > [!TIP]
 > No subscription? Copying from the USB stick uses the sync module, so the Blink app may briefly say *"system busy"* while a clip is being copied. Running every 60 minutes (or overnight with an automation calling `blink_plus.archive_clips`) keeps that out of your way.
 

@@ -334,6 +334,8 @@ class BlinkPlusAuth(Auth):
             raise BlinkAuthStepError(
                 "authorization code", resp.status, location or await resp.text()
             )
+        # Only the redirect header was needed: hand the connection back.
+        resp.release()
         token = await self._token_request(
             {
                 "app_brand": "blink",
