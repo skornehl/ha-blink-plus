@@ -39,6 +39,7 @@ from typing import Any
 from blinkpy import api as blink_api
 
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
@@ -56,6 +57,7 @@ RESUME_AFTER_PAUSE = 120  # s, carry on after a live view interrupted the copy
 RESUME_AFTER_ERROR = 300  # s
 RESUME_AFTER_CAP = 30  # s, more clips waiting
 MAX_AUTO_RESUMES = 12  # in a row without progress
+MAX_CLIP_ATTEMPTS = 3  # runs a clip may fail before it is skipped for good
 
 CLIP_URL = string.Template(
     "/api/v1/accounts/$account_id/networks/$network_id/sync_modules/$sync_id"
@@ -102,6 +104,9 @@ class ClipArchiver:
         self._run_failed = 0
         self._resume_handle = None
         self._auto_resumes = 0
+        self._resume_given_up = False
+        # clip id -> failed runs, per source ("cloud" or a sync id)
+        self._failures: dict[str, dict[str, int]] = {}
 
     @property
     def blink(self):
@@ -123,12 +128,18 @@ class ClipArchiver:
         self._saved = {k: list(v) for k, v in mine.get("saved", {}).items()}
         self.status["saved_total"] = int(mine.get("saved_total", 0))
         self._initial_done = bool(mine.get("initial_done", False))
+        self._failures = {
+            k: {str(c): int(n) for c, n in v.items()}
+            for k, v in mine.get("failures", {}).items()
+        }
+        self.status["skipped_clips"] = self._skipped_count()
 
     async def _async_save_store(self) -> None:
         self._all[self.folder] = {
             "saved": {k: v[-MAX_REMEMBERED:] for k, v in self._saved.items()},
             "saved_total": self.status["saved_total"],
             "initial_done": self._initial_done,
+            "failures": self._failures,
         }
         await self._store.async_save({"folders": self._all})
 
@@ -138,8 +149,9 @@ class ClipArchiver:
             raise RuntimeError("archive is running, try again when it's done")
         self.cancel_resume()
         self._saved = {}
+        self._failures = {}
         self._initial_done = False
-        self.status.update(saved_total=0, last_clip=None, last_clip_path=None,
+        self.status.update(saved_total=0, skipped_clips=0, last_clip=None, last_clip_path=None,
                            last_clip_camera=None, last_result="memory reset")
         await self._async_save_store()
         self._notify()
@@ -154,6 +166,40 @@ class ClipArchiver:
     def _live_active(self) -> bool:
         return any(srv.active for srv in self.coordinator.live_servers.values())
 
+    def shutdown(self) -> None:
+        """Stop for good (entry unload): no new runs, no pending resume."""
+        self.enabled = False
+        self.cancel_resume()
+
+    # ------------------------------------------------------- failing clips
+    def _fail_count(self, key: str, cid: int) -> int:
+        return self._failures.get(key, {}).get(str(cid), 0)
+
+    def _given_up(self, key: str, cid: int) -> bool:
+        return self._fail_count(key, cid) >= MAX_CLIP_ATTEMPTS
+
+    def _note_failure(self, key: str, cid: int) -> None:
+        """Count a failed run for this clip; after MAX_CLIP_ATTEMPTS it is skipped."""
+        counts = self._failures.setdefault(key, {})
+        counts[str(cid)] = counts.get(str(cid), 0) + 1
+        if counts[str(cid)] == MAX_CLIP_ATTEMPTS:
+            _LOGGER.warning(
+                "Blink clip archive: giving up on clip %s after %d failed runs",
+                cid, MAX_CLIP_ATTEMPTS,
+            )
+            self.status["skipped_clips"] = self._skipped_count()
+        else:
+            self._run_failed += 1
+
+    def _note_success(self, key: str, cid: int) -> None:
+        self._failures.get(key, {}).pop(str(cid), None)
+
+    def _skipped_count(self) -> int:
+        return sum(
+            1 for counts in self._failures.values() for n in counts.values()
+            if n >= MAX_CLIP_ATTEMPTS
+        )
+
     # ------------------------------------------------------------------ run
     async def async_run(self, hours: float = 24, max_clips: int = 25) -> dict[str, Any]:
         """Copy clips from the last `hours` that haven't been saved yet."""
@@ -162,9 +208,12 @@ class ClipArchiver:
         if self._lock.locked():
             return {"result": "already running"}
         async with self._lock:
+            # This run decides about the next resume itself.
+            self.cancel_resume()
             self.status.update(state="running", last_error=None, saved_last_run=0)
             self._notify()
             result = "done"
+            kind = "done"  # done | more | paused | error | fatal
             self._run_saved = 0
             self._run_failed = 0
             full_copy = not self._initial_done
@@ -189,25 +238,42 @@ class ClipArchiver:
                                 sync, hours, max_clips - self._run_saved
                             )
                 if cloud_found is None and not syncs:
-                    raise RuntimeError(
+                    raise _NoSource(
                         "no clips source: no cloud clips (subscription) and no "
                         "Sync Module with active USB storage"
                     )
                 if self._run_saved >= max_clips:
                     notes.append(f"stopped at {max_clips} clips, more next run")
+                    kind = "more"
                 if full_copy:
                     notes.insert(0, "first full copy")
                     if self._run_failed:
                         notes.append(f"{self._run_failed} clip(s) to retry")
-                    elif not any(n.startswith("USB skipped") for n in notes):
+                        kind = "more"
+                    elif any(n.startswith("USB skipped") for n in notes):
+                        kind = "more"
+                    else:
                         self._initial_done = True
+                elif self._run_failed:
+                    notes.append(f"{self._run_failed} clip(s) to retry")
+                skipped = self.status.get("skipped_clips") or 0
+                if skipped:
+                    notes.append(f"{skipped} clip(s) skipped after {MAX_CLIP_ATTEMPTS} failed runs")
                 result = "done" + (f" ({'; '.join(notes)})" if notes else "")
             except _LiveViewStarted:
                 result = "paused: a live view started"
+                kind = "paused"
+            except _NoSource as err:
+                # Nothing to retry: the account has no source of clips.
+                _LOGGER.warning("Blink clip archive: %s", err)
+                self.status["last_error"] = str(err)
+                result = "error"
+                kind = "fatal"
             except Exception as err:  # noqa: BLE001
                 _LOGGER.warning("Blink clip archive failed: %s", err, exc_info=True)
                 self.status["last_error"] = str(err) or type(err).__name__
                 result = "error"
+                kind = "error"
             finally:
                 saved = self._run_saved
                 self.status.update(
@@ -219,24 +285,31 @@ class ClipArchiver:
                 await self._async_save_store()
                 self._notify()
             _LOGGER.info("Blink clip archive: %s, %d clip(s) saved", result, saved)
-            self._schedule_resume(result, saved, hours, max_clips, full_copy)
+            self._schedule_resume(kind, saved, hours, max_clips)
             return {"result": result, "saved": saved}
 
-    def _schedule_resume(self, result, saved, hours, max_clips, full_copy) -> None:
+    def _schedule_resume(self, kind: str, saved: int, hours, max_clips) -> None:
         """Carry on by itself after a pause, an error, or the per-run cap."""
-        if result.startswith("paused"):
-            delay = RESUME_AFTER_PAUSE
-        elif result == "error":
-            delay = RESUME_AFTER_ERROR
-        elif "more next run" in result or (full_copy and not self._initial_done):
-            delay = RESUME_AFTER_CAP
-        else:
+        if saved or kind == "done":
+            # Progress (or a clean run): auto-resume may be used again.
             self._auto_resumes = 0
+            self._resume_given_up = False
+        delay = {
+            "paused": RESUME_AFTER_PAUSE,
+            "error": RESUME_AFTER_ERROR,
+            "more": RESUME_AFTER_CAP,
+        }.get(kind)
+        if delay is None or not self.enabled:
             return
-        self._auto_resumes = 0 if saved else self._auto_resumes + 1
+        if self._resume_given_up:
+            # Gave up earlier and still no progress: wait for the next scheduled
+            # run instead of starting another series of resumes.
+            return
+        if not saved:
+            self._auto_resumes += 1
         if self._auto_resumes > MAX_AUTO_RESUMES:
             _LOGGER.warning("Blink clip archive: giving up auto-resume (no progress)")
-            self._auto_resumes = 0
+            self._resume_given_up = True
             return
         self.cancel_resume()
         self.status["next_auto_resume_s"] = delay
@@ -247,15 +320,14 @@ class ClipArchiver:
             self.status["next_auto_resume_s"] = None
             await self.async_run(hours=hours, max_clips=max_clips)
 
-        from homeassistant.helpers.event import async_call_later  # noqa: PLC0415
-
         self._resume_handle = async_call_later(self.hass, delay, _resume)
 
     def cancel_resume(self) -> None:
-        """Cancel a scheduled automatic resume (unload / reset)."""
+        """Cancel a scheduled automatic resume (unload / reset / new run)."""
         if self._resume_handle:
             self._resume_handle()
             self._resume_handle = None
+        self.status["next_auto_resume_s"] = None
 
     def _local_storage_syncs(self) -> list:
         syncs = []
@@ -296,24 +368,30 @@ class ClipArchiver:
                 created = dt_util.parse_datetime(str(m["created_at"]))
             except (KeyError, TypeError, ValueError):
                 continue
-            if cid in done or created is None:
+            if cid in done or created is None or self._given_up("cloud", cid):
                 continue
             if created.tzinfo is None:
                 created = created.replace(tzinfo=dt_util.UTC)
             todo.append((created, cid, m.get("device_name") or "camera", m["media"]))
-        todo.sort()
+        # Oldest first, but clips that failed before go last.
+        todo.sort(key=lambda t: (self._fail_count("cloud", t[1]), t[0]))
         for created, cid, camera, media in todo[: max(budget - self._run_saved, 0)]:
             url = f"{self.blink.urls.base_url}{media}"
+            self._clip_error = ""
             try:
                 path = await self._fetch_to_file(url, camera, created, cid)
             except Exception as err:  # noqa: BLE001
-                self._clip_error = f"{type(err).__name__}: {err}"
-                self.status["last_error"] = f"cloud clip {cid}: {self._clip_error}"
+                self._clip_error = self._clip_error or f"{type(err).__name__}: {err}"
                 path = None
-            if path is not None:
-                self._record_saved("cloud", cid, camera, created, path)
-                await self._async_save_store()
-                await asyncio.sleep(0.5)
+            if path is None:
+                self._note_failure("cloud", cid)
+                self.status["last_error"] = f"cloud clip {cid}: {self._clip_error}"
+                self._notify()
+                continue
+            self._note_success("cloud", cid)
+            self._record_saved("cloud", cid, camera, created, path)
+            await self._async_save_store()
+            await asyncio.sleep(0.5)
         return len(todo)
 
     def _record_saved(self, key: str, cid: int, camera: str, created, path: Path) -> None:
@@ -359,7 +437,8 @@ class ClipArchiver:
         finally:
             self.usb_busy = False
         names = getattr(sync, "_names_table", {}) or {}
-        done = set(self._saved.get(str(sync.sync_id), []))
+        key = str(sync.sync_id)
+        done = set(self._saved.get(key, []))
         cutoff = dt_util.utcnow() - timedelta(hours=hours) if hours else None
 
         todo = []
@@ -369,7 +448,7 @@ class ClipArchiver:
                 created = dt_util.parse_datetime(str(clip["created_at"]))
             except (KeyError, TypeError, ValueError):
                 continue
-            if cid in done or created is None:
+            if cid in done or created is None or self._given_up(key, cid):
                 continue
             if created.tzinfo is None:
                 created = created.replace(tzinfo=dt_util.UTC)
@@ -377,7 +456,9 @@ class ClipArchiver:
                 continue
             camera = names.get(clip.get("camera_name"), clip.get("camera_name", "camera"))
             todo.append((created, cid, camera))
-        todo.sort()  # oldest first
+        # Oldest first, but clips that failed in earlier runs go last, so a few
+        # broken clips at the front can't block newer ones forever.
+        todo.sort(key=lambda t: (self._fail_count(key, t[1]), t[0]))
         _LOGGER.debug("%d new USB clip(s) to copy on %s", len(todo), sync.name)
 
         saved = 0
@@ -385,16 +466,16 @@ class ClipArchiver:
         for created, cid, camera in todo[:budget]:
             if self._live_active():
                 raise _LiveViewStarted
+            self._clip_error = ""
             try:
                 path = await self._download(sync, manifest_id, cid, camera, created)
-            except _LiveViewStarted:
-                raise
             except Exception as err:  # noqa: BLE001  (one bad clip must not end the run)
-                self._clip_error = f"{type(err).__name__}: {err}"
+                # Keep a clearer reason set further down (e.g. "can't write to ...").
+                self._clip_error = self._clip_error or f"{type(err).__name__}: {err}"
                 path = None
             if path is None:
                 fails += 1
-                self._run_failed += 1
+                self._note_failure(key, cid)
                 _LOGGER.warning(
                     "Clip %s from %s not copied (%s), %d failed in a row",
                     cid, camera, self._clip_error, fails,
@@ -411,13 +492,17 @@ class ClipArchiver:
                     self.usb_busy = True
                     try:
                         manifest_id, _ = await self._manifest(sync)
+                    except Exception as err:  # noqa: BLE001
+                        # Keep going with the old list rather than ending the run.
+                        _LOGGER.debug("Could not refresh the USB clip list: %s", err)
                     finally:
                         self.usb_busy = False
                 await asyncio.sleep(PAUSE_BETWEEN_CLIPS * 3)
                 continue
             fails = 0
             saved += 1
-            self._record_saved(str(sync.sync_id), cid, camera, created, path)
+            self._note_success(key, cid)
+            self._record_saved(key, cid, camera, created, path)
             await self._async_save_store()
             await asyncio.sleep(PAUSE_BETWEEN_CLIPS)
         return saved
@@ -474,6 +559,10 @@ class ClipArchiver:
 
 class _LiveViewStarted(Exception):
     """Stop archiving: someone opened a live view."""
+
+
+class _NoSource(RuntimeError):
+    """The account has neither cloud clips nor USB storage (nothing to retry)."""
 
 
 def _write(path: Path, data: bytes) -> None:

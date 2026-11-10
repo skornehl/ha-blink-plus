@@ -8,7 +8,7 @@ CLIPS = [
     {"id": 102, "camera_name": "Backyard", "created_at": (NOW - dt.timedelta(hours=1)).isoformat(), "size": 1},
     {"id": 99, "camera_name": "FrontDoor", "created_at": (NOW - dt.timedelta(days=3)).isoformat(), "size": 1},
 ]
-state = {"live": False, "start_live_after": None, "bad": set()}
+state = {"live": False, "start_live_after": None, "bad": set(), "bad_cloud": set()}
 scheduled = []
 CLOUD = []   # empty = no subscription (Blink returns an empty media list)
 
@@ -25,6 +25,11 @@ async def http_get(blink, url, json=True, **kw):
         page = int(url.rsplit("page=", 1)[1])
         return {"media": CLOUD if page == 1 else []}
     if url.endswith(".mp4"):
+        if any(str(x) in url for x in state["bad_cloud"]):
+            class BadC:
+                status = 503
+                async def read(self): return b""
+            return BadC()
         class C:
             status = 200
             async def read(self): return b"CLOUD-" + url.encode()
@@ -199,6 +204,51 @@ async def main():
     state["live"] = False; state["start_live_after"] = None
     r14 = await e.async_run(hours=24); print("resumed:", r14)
     assert r14["saved"] >= 2
+    # ---- a clip that always fails is skipped after MAX_CLIP_ATTEMPTS runs, so the
+    #      first full copy can complete and it no longer blocks newer clips
+    folder4 = tempfile.mkdtemp()
+    g = archive.ClipArchiver(hass, Coord(), "entry4", folder4); await g.async_load()
+    state["bad"] = {99}; state["bad_cloud"] = {7001}
+    for n in range(1, archive.MAX_CLIP_ATTEMPTS + 1):
+        rr = await g.async_run(hours=24); print(f"always-bad run {n}:", rr)
+        if n < archive.MAX_CLIP_ATTEMPTS:
+            assert "to retry" in rr["result"] and not g._initial_done, rr
+    assert g._initial_done, "first full copy never completed because of one bad clip"
+    assert g.status["skipped_clips"] == 2 and "skipped after" in rr["result"], rr
+    before = len(calls)
+    rr = await g.async_run(hours=24)
+    assert not any(c[0] == "POST" and c[1].endswith("/clip/request/99") for c in calls[before:]), "skipped clip retried"
+    assert "cloud clip 7001" not in (g.status["last_error"] or ""), "skipped cloud clip retried"
+    # remembered across restarts
+    g2 = archive.ClipArchiver(hass, Coord(), "entry4", folder4); await g2.async_load()
+    assert g2.status["skipped_clips"] == 2
+    # reset forgets skipped clips too
+    await g2.async_reset(); assert g2.status["skipped_clips"] == 0 and not g2._failures
+    state["bad"] = set(); state["bad_cloud"] = set()
+
+    # ---- a failing cloud clip counts as failed (full copy not marked complete)
+    folder5 = tempfile.mkdtemp()
+    h = archive.ClipArchiver(hass, Coord(), "entry5", folder5); await h.async_load()
+    state["bad_cloud"] = {7001}
+    rr = await h.async_run(hours=24); print("bad cloud clip:", rr, h.status["last_error"])
+    assert not h._initial_done and "1 clip(s) to retry" in rr["result"]
+    assert "cloud clip 7001" in h.status["last_error"] and "HTTP 503" in h.status["last_error"]
+    state["bad_cloud"] = set()
+
+    # ---- unload: no new run, no resume
+    scheduled.clear()
+    h.shutdown()
+    rr = await h.async_run(hours=24); print("after shutdown:", rr)
+    assert rr["result"] == "disabled" and scheduled == []
+
+    # ---- no clip source at all: an error, but nothing to retry automatically
+    class EmptyBlink: account_id = 1; urls = U(); sync = {}
+    class EmptyCoord: api = EmptyBlink(); live_servers = {}
+    saved_cloud = list(CLOUD); CLOUD.clear(); scheduled.clear()
+    k = archive.ClipArchiver(hass, EmptyCoord(), "entry6", tempfile.mkdtemp()); await k.async_load()
+    rr = await k.async_run(hours=24); print("no source:", rr, k.status["last_error"])
+    assert rr["result"] == "error" and "no clips source" in k.status["last_error"] and scheduled == []
+    CLOUD.extend(saved_cloud)
     print("PASS archive")
 
 asyncio.run(main())

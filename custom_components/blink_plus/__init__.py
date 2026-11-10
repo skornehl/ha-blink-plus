@@ -138,11 +138,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: BlinkConfigEntry) -> boo
     entry.runtime_data = coordinator
 
     await _async_start_live_servers(entry, coordinator)
-    coordinator.options_snapshot = dict(entry.options)
-    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
+    try:
+        coordinator.options_snapshot = dict(entry.options)
+        entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
-    await _async_setup_archive(hass, entry, coordinator)
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+        await _async_setup_archive(hass, entry, coordinator)
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    except BaseException:
+        # A failed setup is not unloaded: free the listening ports ourselves,
+        # or the retry can't bind them again.
+        await _async_stop_live_servers(coordinator)
+        if coordinator.archiver is not None:
+            coordinator.archiver.shutdown()
+        raise
 
     # Run the first full (possibly slow) Blink refresh after setup has finished,
     # in the background, instead of inside setup.
@@ -163,7 +171,9 @@ async def _async_setup_archive(
     archiver = ClipArchiver(hass, coordinator, entry.entry_id, folder)
     await archiver.async_load()
     coordinator.archiver = archiver
-    entry.async_on_unload(archiver.cancel_resume)
+    # Unload: no new runs and no pending resume. A run still in progress
+    # finishes its current clip and then stops scheduling itself.
+    entry.async_on_unload(archiver.shutdown)
     for server in coordinator.live_servers.values():
         server.sync_busy = lambda: archiver.usb_busy
     if not hass.config.is_allowed_path(folder):
@@ -346,7 +356,15 @@ async def async_unload_entry(hass: HomeAssistant, entry: BlinkConfigEntry) -> bo
     """Unload Blink entry."""
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
-        for server in entry.runtime_data.live_servers.values():
-            await server.async_stop()
-        entry.runtime_data.live_servers.clear()
+        await _async_stop_live_servers(entry.runtime_data)
     return unloaded
+
+
+async def _async_stop_live_servers(coordinator: BlinkUpdateCoordinator) -> None:
+    """Stop every local live view server (ends running Blink sessions)."""
+    for server in list(coordinator.live_servers.values()):
+        try:
+            await server.async_stop()
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("Stopping live view server failed", exc_info=True)
+    coordinator.live_servers.clear()
