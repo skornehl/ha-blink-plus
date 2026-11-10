@@ -2,7 +2,7 @@
 
 All notable changes to Blink Plus. The project follows [Semantic Versioning](https://semver.org/). It's pre-1.0, so options and behaviour may still change between minor versions.
 
-## [0.3.3] - 2026-11-10
+## [Unreleased]
 
 ### Fixed
 - Clip archive: a clip that keeps failing no longer blocks the archive. After 3 failed runs it is **skipped for good** (shown as `skipped_clips` on the Last archived clip sensor; `blink_plus.reset_archive` forgets it). Clips that failed before are tried last, so a few broken old clips can't keep newer ones from being copied, and the first full copy can complete.

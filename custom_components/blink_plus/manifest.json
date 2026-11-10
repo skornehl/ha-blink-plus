@@ -19,5 +19,5 @@
   "requirements": [
     "blinkpy>=0.25.5"
   ],
-  "version": "0.3.3"
+  "version": "0.3.2"
 }
