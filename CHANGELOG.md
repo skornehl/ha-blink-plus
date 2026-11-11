@@ -2,7 +2,7 @@
 
 All notable changes to Blink Plus. The project follows [Semantic Versioning](https://semver.org/). It's pre-1.0, so options and behaviour may still change between minor versions.
 
-## [Unreleased]
+## [0.4.0] - 2026-11-11
 
 ### Added
 - **Two-way talk** while a camera's live view is open, like in the Blink app:
