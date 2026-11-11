@@ -14,6 +14,7 @@ from homeassistant.core import (
 from homeassistant.helpers import config_validation as cv, service
 
 from .const import DOMAIN
+from .talk_view import async_handle_play_audio
 
 SERVICE_RECORD = "record"
 SERVICE_TRIGGER = "trigger_camera"
@@ -69,13 +70,18 @@ def async_setup_services(hass: HomeAssistant) -> None:
         schema=None,
         func="stop_live_view",
     )
-    service.async_register_platform_entity_service(
-        hass,
+
+    async def _play_audio(call: ServiceCall) -> None:
+        await async_handle_play_audio(hass, call)
+
+    # Not an entity service on purpose: see talk_view.py.
+    hass.services.async_register(
         DOMAIN,
         SERVICE_PLAY_AUDIO,
-        entity_domain=CAMERA_DOMAIN,
-        schema={vol.Required(CONF_FILE_PATH): cv.string},
-        func="play_audio",
+        _play_audio,
+        schema=cv.make_entity_service_schema(
+            {vol.Required(CONF_FILE_PATH): cv.string}
+        ),
     )
 
     async def _archive_clips(call: ServiceCall) -> ServiceResponse:

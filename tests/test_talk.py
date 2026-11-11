@@ -213,6 +213,7 @@ async def main():
     assert s1["header"][34:98].rstrip(b"\0") == TOKEN.encode(), s1["header"][34:98]
     assert s1["raw_after_header"] == bytes([0x0A]) + bytes(8), s1["raw_after_header"].hex()
     print("auth header carries the token, initial keepalive seq 0 follows")
+    assert live.stats.as_dict()["live_view_token_used"] is True, "token_used must be set while streaming"
 
     # 2. Normal talk: exact sequence, real-time pacing.
     print("2. talk 2 s of audio")
@@ -347,6 +348,7 @@ async def main():
     assert s4["header"][34:98] == bytes(64)
     assert s4["raw_after_header"][0] != 0x0A or s4["raw_after_header"][1:5] != bytes(4)
     assert not nolive.talk_ready
+    assert nolive.stats.as_dict()["live_view_token_used"] is False
     await expect(immis.TalkError, talk.async_talk(nolive, chunked(good)), "no token")
     await asyncio.sleep(0.2)
     assert not talk_packets(s4)
@@ -354,6 +356,42 @@ async def main():
     await nolive.async_stop()
     await view
     srv.close()
+
+    # 10. Closing the command is best effort: blinkpy's ERROR logs for these
+    # calls are muted (only for them), and a missing answer is retried once.
+    print("10. quiet, retried command done")
+    import logging
+
+    records = []
+
+    class Grab(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    logging.getLogger().addHandler(Grab())
+    blinkpy_log = logging.getLogger("blinkpy.auth")
+    posts = []
+
+    async def flaky_post(blink, url, data=None, **kw):
+        posts.append(url)
+        if len(posts) == 1:  # stale keep-alive: blinkpy logs ERROR, returns None
+            blinkpy_log.error("Connection error. Endpoint %s possibly down or throttled.", url)
+            return None
+        return {}
+
+    async def legacy_done(blink, net, cid):
+        posts.append("legacy")
+        blinkpy_log.error("Connection error. Endpoint legacy possibly down or throttled.")
+        return None
+
+    immis.blink_api.http_post, immis.blink_api.request_command_done = flaky_post, legacy_done
+    done = immis.BlinkLiveViewServer(Blink(), Cam())
+    await done._command_done(42, 4711)
+    print(f"  requests: {[p.rsplit('/', 3)[-3:] if p != 'legacy' else p for p in posts]}")
+    assert len(posts) == 4, posts  # v1 twice (retry), legacy twice
+    assert not [r for r in records if r.name == "blinkpy.auth"], "blinkpy ERROR leaked"
+    blinkpy_log.error("a real blinkpy error elsewhere")
+    assert [r for r in records if r.name == "blinkpy.auth"], "filter must only mute our calls"
 
 
 asyncio.run(main())

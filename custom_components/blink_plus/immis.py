@@ -48,7 +48,8 @@ verified audibly on a Mini with the Blink app closed:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+import contextvars
 from dataclasses import dataclass, field
 import json
 import logging
@@ -60,6 +61,19 @@ import urllib.parse
 from blinkpy import api as blink_api
 
 _LOGGER = logging.getLogger(__name__)
+
+# Closing a live view command is best effort. blinkpy logs every connection
+# error as ERROR ("possibly down or throttled"); for these calls we retry and
+# log ourselves instead. The flag is per task, so other requests still log.
+_QUIET_BLINKPY = contextvars.ContextVar("blink_plus_quiet_blinkpy", default=False)
+
+
+class _QuietBestEffort(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not _QUIET_BLINKPY.get()
+
+
+logging.getLogger("blinkpy.auth").addFilter(_QuietBestEffort())
 
 TS_PACKET = 188
 IMMI_HEADER = 9
@@ -642,6 +656,7 @@ class BlinkLiveViewServer:
             self.stats.last_error = None
             self._immis_writer = writer
             self._immis_has_token = token is not None
+            self.stats.token_used = token is not None
             self._changed()
             await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             return True
@@ -874,14 +889,40 @@ class BlinkLiveViewServer:
             f"{self.blink.urls.base_url}/api/v1/accounts/{self.blink.account_id}"
             f"/networks/{network_id}/commands/{command_id}/done"
         )
-        try:
-            await blink_api.http_post(self.blink, url, data="{}")
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("%s: command done (v1) failed: %s", self.name, err)
-        try:
-            await blink_api.request_command_done(self.blink, network_id, command_id)
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("%s: command done failed: %s", self.name, err)
+        v1 = await self._best_effort(
+            "command done (v1)", lambda: blink_api.http_post(self.blink, url, data="{}")
+        )
+        legacy = await self._best_effort(
+            "command done",
+            lambda: blink_api.request_command_done(self.blink, network_id, command_id),
+        )
+        if v1 is None and legacy is None:
+            _LOGGER.info(
+                "%s: Blink did not answer when closing the live view command; "
+                "it ends on its own after the session time limit",
+                self.name,
+            )
+
+    async def _best_effort(
+        self, what: str, call: Callable[[], Awaitable[Any]], attempts: int = 2
+    ) -> Any:
+        """Run a Blink request quietly; retry once (e.g. a stale keep-alive
+        connection after a long live view). Return None if it never answered."""
+        for attempt in range(1, attempts + 1):
+            token = _QUIET_BLINKPY.set(True)
+            try:
+                resp = await call()
+            except Exception as err:  # noqa: BLE001
+                resp = None
+                _LOGGER.debug("%s: %s failed: %s", self.name, what, err)
+            finally:
+                _QUIET_BLINKPY.reset(token)
+            if resp is not None:
+                return resp
+            _LOGGER.debug("%s: %s got no answer (attempt %d)", self.name, what, attempt)
+            if attempt < attempts:
+                await asyncio.sleep(1)
+        return None
 
 
 async def _send_stop_and_close(writer: asyncio.StreamWriter, name: str) -> None:

@@ -285,7 +285,7 @@ After you close a camera in HA, it's released within about **35 seconds** (HA ke
 | Action | |
 |---|---|
 | `blink_plus.stop_live_view` | End a camera's live view now |
-| `blink_plus.play_audio` | Play an audio file through the camera speaker (`file_path`); only while its live view is open, max. 60 s. See [Two-way talk](#two-way-talk) |
+| `blink_plus.play_audio` | Play an audio file through the camera speaker (`file_path`); only while its live view is open, max. 60 s. Runs alongside other camera actions. See [Two-way talk](#two-way-talk) |
 | `blink_plus.archive_clips` | Copy new clips to the archive folder now (`hours`, `max_clips`); returns a summary |
 | `blink_plus.reset_archive` | Forget what was copied to the current folder; the next run copies everything again |
 | `blink_plus.trigger_camera` | Take a new snapshot (wakes the camera) |
