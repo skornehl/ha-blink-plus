@@ -42,6 +42,18 @@ stop_live_view:
       integration: blink_plus
       domain: camera
 
+play_audio:
+  target:
+    entity:
+      integration: blink_plus
+      domain: camera
+  fields:
+    file_path:
+      required: true
+      example: "/media/sounds/please_wait.mp3"
+      selector:
+        text:
+
 archive_clips:
   fields:
     hours:

@@ -52,6 +52,11 @@ jobs:
           python3 test_immis.py . ../custom_components/blink_plus/immis.py null_only
           python3 test_preempt.py . ../custom_components/blink_plus/immis.py
           python3 test_failure.py . ../custom_components/blink_plus/immis.py
+      - name: Two-way talk
+        working-directory: tests
+        run: |
+          python3 test_talk.py . ../custom_components/blink_plus/immis.py \
+            ../custom_components/blink_plus/talk.py
       - name: Clip archive (cloud + USB)
         working-directory: tests
         run: python3 test_archive.py ../custom_components/blink_plus/archive.py
