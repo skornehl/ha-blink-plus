@@ -1,7 +1,9 @@
 """Support for Blink system camera."""
 
 from collections.abc import Mapping
+from contextlib import aclosing
 import logging
+import os
 from typing import Any, override
 
 from blinkpy.auth import UnauthorizedError
@@ -21,7 +23,8 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DEFAULT_BRAND, DOMAIN
 from .coordinator import BlinkConfigEntry, BlinkUpdateCoordinator
-from .immis import BlinkLiveViewServer, live_key
+from .immis import BlinkLiveViewServer, TalkError, live_key
+from .talk import AudioFormatError, TalkBusyError, async_talk, ffmpeg_adts
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -81,6 +84,7 @@ class BlinkCamera(CoordinatorEntity[BlinkUpdateCoordinator], Camera):
         if self._live is not None:
             self._live.on_change = self._live_changed
             self._live.on_preempt = self._live_preempted
+            self._live.entity_id = self.entity_id
 
     @override
     async def async_will_remove_from_hass(self) -> None:
@@ -88,6 +92,7 @@ class BlinkCamera(CoordinatorEntity[BlinkUpdateCoordinator], Camera):
         if self._live is not None:
             self._live.on_change = None
             self._live.on_preempt = None
+            self._live.entity_id = None
         await super().async_will_remove_from_hass()
 
     def _live_preempted(self) -> None:
@@ -118,6 +123,55 @@ class BlinkCamera(CoordinatorEntity[BlinkUpdateCoordinator], Camera):
             await self.stream.stop()
         if self._live:
             await self._live.async_stop_session()
+
+    async def play_audio(self, file_path: str) -> None:
+        """Play an audio file through the camera speaker (open live view only)."""
+        if not self.hass.config.is_allowed_path(file_path):
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="no_path",
+                translation_placeholders={"target": file_path},
+            )
+        if not await self.hass.async_add_executor_job(os.path.isfile, file_path):
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="talk_no_file",
+                translation_placeholders={"target": file_path},
+            )
+        if self._live is None or not self._live.talk_ready:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="talk_no_live_view",
+            )
+        try:
+            from homeassistant.components.ffmpeg import get_ffmpeg_manager  # noqa: PLC0415
+
+            binary = get_ffmpeg_manager(self.hass).binary
+        except Exception:  # noqa: BLE001
+            binary = "ffmpeg"
+        try:
+            async with aclosing(ffmpeg_adts(file_path, ffmpeg=binary)) as chunks:
+                await async_talk(self._live, chunks)
+        except TalkBusyError as err:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN, translation_key="talk_busy"
+            ) from err
+        except AudioFormatError as err:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="talk_bad_audio",
+                translation_placeholders={"error": str(err)},
+            ) from err
+        except TalkError as err:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="talk_failed",
+                translation_placeholders={"error": str(err)},
+            ) from err
+        except TimeoutError as err:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN, translation_key="talk_too_long"
+            ) from err
 
     @property
     @override

@@ -46,6 +46,7 @@ from .blinkpy_patches import apply_blinkpy_patches
 from .immis import BlinkLiveViewServer, live_key
 from .session import async_blink_session
 from .services import async_setup_services
+from .talk_view import BlinkTalkView
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -109,6 +110,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up Blink."""
 
     async_setup_services(hass)
+    hass.http.register_view(BlinkTalkView())
 
     return True
 

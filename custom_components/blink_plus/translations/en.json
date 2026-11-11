@@ -106,6 +106,24 @@
     },
     "not_loaded": {
       "message": "{target} is not loaded."
+    },
+    "talk_bad_audio": {
+      "message": "Could not play the audio: {error}"
+    },
+    "talk_busy": {
+      "message": "Someone is already talking to this camera."
+    },
+    "talk_failed": {
+      "message": "Two-way talk failed: {error}"
+    },
+    "talk_no_file": {
+      "message": "Audio file {target} not found."
+    },
+    "talk_no_live_view": {
+      "message": "Two-way talk only works while the camera's live view is open. Open the live view first."
+    },
+    "talk_too_long": {
+      "message": "Two-way talk stopped after 60 seconds."
     }
   },
   "issues": {
@@ -191,6 +209,16 @@
     "reset_archive": {
       "name": "Reset clip archive",
       "description": "Forgets which clips were already copied to the current archive folder, so the next run copies them again (within the look-back window)."
+    },
+    "play_audio": {
+      "name": "Play audio",
+      "description": "Plays an audio file through the camera's speaker (two-way talk). Only works while the live view is open. At most 60 seconds.",
+      "fields": {
+        "file_path": {
+          "name": "File path",
+          "description": "Audio file to play (any format ffmpeg reads). Must be in an allowed folder, e.g. /media."
+        }
+      }
     }
   }
 }

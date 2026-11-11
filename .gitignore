@@ -8,3 +8,5 @@ venv/
 tests/sample.ts
 tests/out_*.ts
 tests/*.pem
+tests/talk_*.aac
+tests/talk_*.wav

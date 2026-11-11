@@ -28,6 +28,21 @@ VLC...), we:
    ``intent=extended_liveview``, as the app does for RESTART_IN_ELV.
 5. When the last client leaves, wait a short linger time, then close the
    session and mark the command done.
+
+Two-way talk
+------------
+Talk rides the open IMMIS connection, as in the app (talk only works during
+live view). The sequence below follows zperkd/blink-plus (MIT), where it was
+verified audibly on a Mini with the Blink app closed:
+
+* the session must have been opened with the real ``liveview_token`` in the
+  auth header, followed by the app's initial keepalive (0x0A, seq 0);
+* speaker on is IMMI 0x17 with control ID 3, then wait for a fresh 0x18 ack;
+* audio goes out as IMMI 0x05 packets, one ADTS AAC-LC 16 kHz mono frame each,
+  with their own sequence counting from 0;
+* speaker off is IMMI 0x17 with control ID 4.
+
+``talk.py`` checks and paces the audio; this module only writes the packets.
 """
 
 from __future__ import annotations
@@ -55,6 +70,14 @@ MSG_LATENCY = 0x12
 # AUDIO=5 START=6 STOP=7 CLOSE=8 KEEPALIVE_CONFIG=9 KEEPALIVE=10 JOIN=11
 # AUDIO_CONFIG=12 CLIENT_JOIN=13 REQUEST_SHUTDOWN=14 BUTTON_PRESS=15 ...
 MSG_STOP = 0x07
+MSG_AUDIO = 0x05
+MSG_SPEAKER = 0x17  # speaker control, the control ID goes in the seq field
+MSG_SPEAKER_ACK = 0x18
+SPEAKER_ON = 3
+SPEAKER_OFF = 4
+TALK_ACK_TIMEOUT = 3  # s to wait for the camera to acknowledge speaker on
+# The app sends its first keepalive (seq 0) together with the auth header.
+INITIAL_KEEPALIVE = bytes([MSG_KEEPALIVE]) + bytes(8)
 # IMMIStreamSource::setConnectionState(Disconnecting): stop keepalives, then
 # sendMediaInfo(STOP, seq=1, empty payload), then close the socket.
 STOP_PACKET = bytes([MSG_STOP]) + (1).to_bytes(4, "big") + (0).to_bytes(4, "big")
@@ -70,6 +93,20 @@ FIRST_DATA_TIMEOUT = 30  # seconds to wait for first video after auth
 
 class LiveViewError(Exception):
     """Live view could not be started."""
+
+
+class TalkError(Exception):
+    """Two-way talk is not possible right now."""
+
+
+def immi_packet(msgtype: int, seq: int, payload: bytes = b"") -> bytes:
+    """Build one IMMI packet: type(1) seq(4) len(4) payload."""
+    return (
+        bytes([msgtype])
+        + (seq & 0xFFFFFFFF).to_bytes(4, "big")
+        + len(payload).to_bytes(4, "big")
+        + payload
+    )
 
 
 @dataclass
@@ -99,6 +136,7 @@ class LiveStats:
             "live_view_token_used": self.token_used,
             "live_view_viewers": self.extra.get("viewers", []),
             "live_view_cooldown_s": self.extra.get("cooldown", 0),
+            "live_view_talking": self.extra.get("talking", False),
         }
 
 
@@ -249,6 +287,16 @@ class BlinkLiveViewServer:
         self.on_preempt: Callable[[], None] | None = None
         # Returns True while something else (clip archive) has the sync module busy
         self.sync_busy: Callable[[], bool] | None = None
+        # Camera entity id, set by the entity; the talk endpoint looks it up.
+        self.entity_id: str | None = None
+        # Two-way talk: the IMMIS connection of the running session (only while
+        # video is flowing), whether it was opened with the real token, and the
+        # speaker state. One talker per camera at a time (talk_lock).
+        self._immis_writer: asyncio.StreamWriter | None = None
+        self._immis_has_token = False
+        self._talk_ack = asyncio.Event()
+        self._audio_seq = 0
+        self.talk_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------ server
     @property
@@ -571,7 +619,12 @@ class BlinkLiveViewServer:
             asyncio.open_connection(target.hostname, target.port or 443, ssl=ctx),
             timeout=15,
         )
-        writer.write(build_auth_header(serial_for(server, self.camera), server, token))
+        header = build_auth_header(serial_for(server, self.camera), server, token)
+        if token:
+            # Like the app: first keepalive right after authenticating. Talk
+            # stays silent without it (zperkd/blink-plus, verified on a Mini).
+            header += INITIAL_KEEPALIVE
+        writer.write(header)
         await writer.drain()
 
         first_video = asyncio.Event()
@@ -587,10 +640,15 @@ class BlinkLiveViewServer:
                 return False
             self.stats.state = "streaming"
             self.stats.last_error = None
+            self._immis_writer = writer
+            self._immis_has_token = token is not None
             self._changed()
             await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             return True
         finally:
+            if self._immis_writer is writer:
+                self._immis_writer = None
+                self._set_talking(False)
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -659,6 +717,8 @@ class BlinkLiveViewServer:
                 header = await reader.readexactly(IMMI_HEADER)
                 msgtype = header[0]
                 length = int.from_bytes(header[5:9], "big")
+                if msgtype == MSG_SPEAKER_ACK:
+                    self._talk_ack.set()
                 if length <= 0:
                     continue
                 if length > MAX_FRAME:
@@ -676,6 +736,83 @@ class BlinkLiveViewServer:
                 self._broadcast(payload)
         except (asyncio.IncompleteReadError, ConnectionError, ssl.SSLError) as err:
             _LOGGER.debug("%s: IMMIS connection closed: %s", self.name, err)
+
+    # -------------------------------------------------------------------- talk
+    @property
+    def talk_ready(self) -> bool:
+        """Return True while a live view with video (and the token) is open."""
+        writer = self._immis_writer
+        return (
+            writer is not None
+            and not writer.is_closing()
+            and self._immis_has_token
+            and self.stats.state == "streaming"
+        )
+
+    def talk_handle(self) -> asyncio.StreamWriter:
+        """Return the IMMIS connection to talk on, or raise TalkError.
+
+        The handle ties a talk to one Blink session: if the live view ends or
+        is replaced (extended session, preemption), the talk stops instead of
+        speaking into the new session.
+        """
+        writer = self._immis_writer
+        if writer is None or writer.is_closing() or self.stats.state != "streaming":
+            raise TalkError("Open the live view before talking")
+        if not self._immis_has_token:
+            raise TalkError(
+                "This live view runs without the live view token; two-way talk "
+                "needs it (live view token mode auto or token)"
+            )
+        return writer
+
+    def _writer_for(self, handle: asyncio.StreamWriter) -> asyncio.StreamWriter:
+        if self._immis_writer is not handle or handle.is_closing():
+            raise TalkError("The live view ended")
+        return handle
+
+    def _set_talking(self, talking: bool) -> None:
+        if self.stats.extra.get("talking", False) != talking:
+            self.stats.extra["talking"] = talking
+            self._changed()
+
+    async def async_start_talk(self, handle: asyncio.StreamWriter) -> None:
+        """Turn the camera speaker on (0x17/3) and wait for a fresh 0x18 ack."""
+        writer = self._writer_for(handle)
+        self._audio_seq = 0
+        self._talk_ack.clear()
+        writer.write(immi_packet(MSG_SPEAKER, SPEAKER_ON))
+        await writer.drain()
+        try:
+            await asyncio.wait_for(self._talk_ack.wait(), TALK_ACK_TIMEOUT)
+        except TimeoutError:
+            raise TalkError("The camera did not acknowledge talk") from None
+        self._writer_for(handle)
+        self._set_talking(True)
+        _LOGGER.debug("%s: speaker on", self.name)
+
+    async def async_send_audio(self, handle: asyncio.StreamWriter, frame: bytes) -> None:
+        """Send one ADTS AAC frame as an IMMI audio packet (0x05)."""
+        writer = self._writer_for(handle)
+        writer.write(immi_packet(MSG_AUDIO, self._audio_seq, frame))
+        self._audio_seq = (self._audio_seq + 1) & 0xFFFFFFFF
+        try:
+            await writer.drain()
+        except (ConnectionError, OSError, ssl.SSLError) as err:
+            raise TalkError("The live view ended") from err
+
+    async def async_stop_talk(self, handle: asyncio.StreamWriter) -> None:
+        """Turn the camera speaker off (0x17/4), only on the session it was
+        turned on in: an old talk must never touch a newer session."""
+        self._set_talking(False)
+        if self._immis_writer is not handle or handle.is_closing():
+            return
+        try:
+            handle.write(immi_packet(MSG_SPEAKER, SPEAKER_OFF))
+            await asyncio.wait_for(handle.drain(), 3)
+            _LOGGER.debug("%s: speaker off", self.name)
+        except (ConnectionError, OSError, TimeoutError, ssl.SSLError) as err:
+            _LOGGER.debug("%s: could not turn the speaker off: %s", self.name, err)
 
     async def _keepalive(self, writer: asyncio.StreamWriter) -> None:
         seq = 0

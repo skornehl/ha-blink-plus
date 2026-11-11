@@ -15,6 +15,7 @@ python3 test_immis.py   . ../custom_components/blink_plus/immis.py token_ok   # 
 python3 test_immis.py   . ../custom_components/blink_plus/immis.py null_only  # relay rejects the token -> zero-token fallback
 python3 test_preempt.py . ../custom_components/blink_plus/immis.py            # one live view per sync module, STOP on hand-off
 python3 test_failure.py . ../custom_components/blink_plus/immis.py            # silent camera: 1 attempt, STOP, cool-down
+python3 test_talk.py    . ../custom_components/blink_plus/immis.py ../custom_components/blink_plus/talk.py  # two-way talk
 python3 test_archive.py ../custom_components/blink_plus/archive.py            # clip archive: USB (no plan) + cloud (plan), retries, resume,
                                                                                # clips skipped after 3 failed runs, failed cloud clips, unload, no source
 python3 test_blinkpy_patches.py ../custom_components/blink_plus/blinkpy_patches.py  # load reductions: gated to Blink Plus, safe if blinkpy changed

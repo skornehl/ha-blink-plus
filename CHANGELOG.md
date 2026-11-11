@@ -2,6 +2,19 @@
 
 All notable changes to Blink Plus. The project follows [Semantic Versioning](https://semver.org/). It's pre-1.0, so options and behaviour may still change between minor versions.
 
+## [Unreleased]
+
+### Added
+- **Two-way talk** while a camera's live view is open, like in the Blink app:
+  - `blink_plus.play_audio` action: plays an audio file (any format ffmpeg reads, from an allowed folder) through the camera speaker
+  - `POST /api/blink_plus/talk/<camera entity id>`: streams ADTS AAC audio (AAC-LC, 16 kHz, mono) to the camera; needs a login that may control the camera
+  - one talker per camera at a time, at most 60 s per talk, and the speaker is always turned off again; a talk never carries over into a new live view session
+  - new camera attribute `live_view_talking`
+  - the talk sequence (token in the auth header, initial keepalive, speaker control 0x17, ack 0x18, audio 0x05) is adapted from [zperkd/blink-plus](https://github.com/zperkd/blink-plus) (MIT), where it was verified on a Blink Mini
+
+### Changed
+- A live view opened with the live view token now sends the app's initial keepalive (seq 0) right after authenticating. Two-way talk needs it.
+
 ## [0.3.3] - 2026-11-10
 
 ### Fixed

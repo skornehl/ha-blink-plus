@@ -32,6 +32,7 @@ It speaks Blink's own live view protocol (**IMMIS**), reverse engineered from th
 |---|---|
 | 🎥 **Live view** | Outdoor / Indoor (Sync Module), Mini and Video Doorbell, including the new v6 live view API and `liveview_token` |
 | 🍎 **Apple Home & Apple TV** | Through HA's HomeKit Bridge. Doorbells can pop up picture-in-picture on Apple TV |
+| 🗣️ **Two-way talk** | Speak through the camera while its live view is open: play an audio file with an action, or stream audio to an authenticated endpoint |
 | 🔁 **Seamless sessions** | Blink ends live views after a short time limit. Blink Plus continues with `extended_liveview`, like tapping *Continue* in the app |
 | 🧠 **Sync-module friendly** | One live view per system, no polling during live view, no background USB scans, never retries a failing camera. The Blink app keeps working |
 | 🔐 **Login that works in 2026** | OAuth v2 + PKCE, 2FA (email/SMS), per-install device ID, token refresh, and clear error messages |
@@ -209,6 +210,40 @@ Restart, pair each accessory with the code from the HA notification (Home app �
 > [!NOTE]
 > HA's built-in HomeKit Bridge (UI-configured) can hold at most 150 accessories. If you see *"would exceed the 150 device limit"*, filter that bridge so it doesn't also include the Blink Plus entities.
 
+## Two-way talk
+
+Talk works like in the Blink app: **only while the camera's live view is open** (someone is watching it in HA, HomeKit, go2rtc …). It rides that live view session; Blink Plus never wakes a camera just to talk. One person talks to a camera at a time, and one talk ends after **60 seconds**.
+
+**Play a sound or a recorded message** (any format ffmpeg reads, from an [allowed folder](https://www.home-assistant.io/integrations/homeassistant/#allowlist_external_dirs) such as `/media`):
+
+```yaml
+action: blink_plus.play_audio
+target:
+  entity_id: camera.front_door
+data:
+  file_path: /media/sounds/be_right_there.mp3
+```
+
+**Stream audio** to `POST /api/blink_plus/talk/<camera entity id>`. It needs a Home Assistant login (e.g. a [long-lived access token](https://developers.home-assistant.io/docs/auth_api/#long-lived-access-token)) whose user may control that camera. The body is ADTS AAC: **AAC-LC, 16 kHz, mono**. It can be a whole file or a live stream; Blink Plus plays it in real time.
+
+```bash
+ffmpeg -i message.wav -ac 1 -ar 16000 -c:a aac -b:a 32k -f adts - | \
+  curl -H "Authorization: Bearer $HA_TOKEN" --data-binary @- \
+    http://homeassistant.local:8123/api/blink_plus/talk/camera.front_door
+```
+
+| Answer | Meaning |
+|---|---|
+| `200` `{"frames": …, "seconds": …}` | Played |
+| `400` | Not AAC-LC 16 kHz mono ADTS, empty, or the upload broke off |
+| `403` / `404` | No permission for that camera / not a Blink Plus camera |
+| `408` | Longer than 60 seconds (the rest was cut off) |
+| `409` | Someone else is talking to this camera |
+| `503` | No open live view, the camera didn't acknowledge, or the live view ended |
+
+> [!NOTE]
+> Talk needs the live view token (*Live view auth token*: `auto` or `token`). The talk sequence comes from [zperkd/blink-plus](https://github.com/zperkd/blink-plus), where it was verified on a Blink Mini. Other models are untested; please report how it goes. While talking, the camera's `live_view_talking` attribute is `true`.
+
 ## go2rtc · Frigate · VLC
 
 Set **Live view listen address** to `0.0.0.0` and a fixed **First live view TCP port** (e.g. `18550`). Each camera's URL is in its `live_view_url` attribute.
@@ -250,6 +285,7 @@ After you close a camera in HA, it's released within about **35 seconds** (HA ke
 | Action | |
 |---|---|
 | `blink_plus.stop_live_view` | End a camera's live view now |
+| `blink_plus.play_audio` | Play an audio file through the camera speaker (`file_path`); only while its live view is open, max. 60 s. See [Two-way talk](#two-way-talk) |
 | `blink_plus.archive_clips` | Copy new clips to the archive folder now (`hours`, `max_clips`); returns a summary |
 | `blink_plus.reset_archive` | Forget what was copied to the current folder; the next run copies everything again |
 | `blink_plus.trigger_camera` | Take a new snapshot (wakes the camera) |
@@ -263,6 +299,7 @@ After you close a camera in HA, it's released within about **35 seconds** (HA ke
 | `live_view_last_error` | Why the last attempt failed (Blink's message, or "camera sent no video …") |
 | `live_view_cooldown_s` | Seconds before this camera may start again |
 | `live_view_viewers` | Who is connected to the stream right now |
+| `live_view_talking` | `true` while someone talks through the camera |
 | `live_view_url` | Local MPEG-TS URL for go2rtc / VLC |
 
 ## Troubleshooting
@@ -313,16 +350,18 @@ logger:
 - [ ] **Push notifications** (Firebase, like the app): instant doorbell press events and motion/person/vehicle detection, without polling
 - [x] Clip archive to a folder / PC (cloud and USB)
 - [ ] Snooze, chime test, lights, Mini-as-chime
-- [ ] Two-way talk
+- [x] Two-way talk (during live view: `blink_plus.play_audio` and an authenticated audio endpoint)
+- [ ] Two-way talk from the dashboard (microphone button)
 
 ## Development
 
-The live view engine has offline tests that run against a fake Blink IMMIS relay and real ffmpeg, so no Blink account is needed. See [`tests/`](tests/). Every push runs them in CI, together with HACS and hassfest validation.
+The live view engine and two-way talk have offline tests that run against a fake Blink IMMIS relay and real ffmpeg, so no Blink account is needed. See [`tests/`](tests/). Every push runs them in CI, together with HACS and hassfest validation.
 
 ## Credits & disclaimer
 
 * Based on Home Assistant's [`blink`](https://www.home-assistant.io/integrations/blink/) integration (Apache-2.0) and [blinkpy](https://github.com/fronzbot/blinkpy) (MIT). IMMIS framing was first documented by blinkpy and blink-liveview-middleware.
 * Endpoint, token and protocol details come from the Blink Android app 60.0 (see [`docs/blink-api-map.md`](docs/blink-api-map.md)).
+* The two-way talk sequence and the ADTS handling are adapted from [zperkd/blink-plus](https://github.com/zperkd/blink-plus) (MIT).
 
 **Blink Plus is an independent community project. It isn't affiliated with, endorsed by or sponsored by Blink or Amazon.** "Blink" is a trademark of Amazon.com, Inc. or its affiliates. The project uses an unofficial API that can change at any time. Use it at your own risk.
 
