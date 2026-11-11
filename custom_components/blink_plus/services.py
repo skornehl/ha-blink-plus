@@ -22,6 +22,7 @@ SERVICE_SAVE_RECENT_CLIPS = "save_recent_clips"
 SERVICE_STOP_LIVE_VIEW = "stop_live_view"
 SERVICE_ARCHIVE_CLIPS = "archive_clips"
 SERVICE_RESET_ARCHIVE = "reset_archive"
+SERVICE_PLAY_AUDIO = "play_audio"
 
 
 @callback
@@ -67,6 +68,14 @@ def async_setup_services(hass: HomeAssistant) -> None:
         entity_domain=CAMERA_DOMAIN,
         schema=None,
         func="stop_live_view",
+    )
+    service.async_register_platform_entity_service(
+        hass,
+        DOMAIN,
+        SERVICE_PLAY_AUDIO,
+        entity_domain=CAMERA_DOMAIN,
+        schema={vol.Required(CONF_FILE_PATH): cv.string},
+        func="play_audio",
     )
 
     async def _archive_clips(call: ServiceCall) -> ServiceResponse:

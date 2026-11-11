@@ -40,6 +40,9 @@
     },
     "reset_archive": {
       "service": "mdi:folder-refresh"
+    },
+    "play_audio": {
+      "service": "mdi:account-voice"
     }
   }
 }
