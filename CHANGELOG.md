@@ -2,7 +2,7 @@
 
 All notable changes to Blink Plus. The project follows [Semantic Versioning](https://semver.org/). It's pre-1.0, so options and behaviour may still change between minor versions.
 
-## [Unreleased]
+## [0.5.0] - 2026-11-12
 
 ### Added
 - **Talk card** `custom:blink-plus-talk-card`, bundled with the integration and loaded automatically (no dashboard resource): live view with sound and a push-to-talk button for one or more cameras, English and German. Optional URL parameters `?camera=<entity>&live=1` pick a camera and start its live view, e.g. from a doorbell notification.
