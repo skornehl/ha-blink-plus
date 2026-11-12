@@ -269,8 +269,55 @@ cameras:
 
 To make both work at home, either:
 
-- **Always use the https address:** in the app, *Settings → Companion app → (your server)*, clear the internal URL (or remove your home Wi-Fi networks). The app then uses the external https address (Home Assistant Cloud, a Cloudflare tunnel …) everywhere. Downside: at home the traffic also goes through the internet.
+- **Always use the https address** (quickest): in the app, *Settings → Companion app → (your server)*, clear the internal URL (or remove your home Wi-Fi networks), then *Troubleshooting → Reset frontend cache*. The app then uses the external https address (Home Assistant Cloud, a Cloudflare tunnel …) everywhere. Downside: at home the traffic also goes through the internet.
 - **Or serve https locally under the external name:** a reverse proxy in front of Home Assistant (e.g. the NGINX SSL add-on) with a Let's Encrypt certificate via DNS-01, plus a DNS entry in your router that points the external hostname to Home Assistant's local IP (split DNS). Set the app's internal and external URL to `https://<that hostname>`. Talk then stays local and works without internet.
+
+<details>
+<summary><b>Example: local https with the NGINX and Let's Encrypt add-ons</b></summary>
+
+Assumptions: Home Assistant OS at `192.168.1.10`, the external name `ha.example.com` (its DNS zone is at Cloudflare here; Let's Encrypt supports many other DNS providers), and a router that can hold local DNS records. Replace these with your own values.
+
+1. **Certificate:** install the *Let's Encrypt* add-on. Configure it for the DNS-01 challenge, so Home Assistant doesn't have to be reachable from the internet, then start it once:
+
+   ```yaml
+   domains:
+     - ha.example.com
+   email: you@example.com
+   keyfile: privkey.pem
+   certfile: fullchain.pem
+   challenge: dns
+   dns:
+     provider: dns-cloudflare
+     cloudflare_api_token: <API token with Zone → DNS → Edit for example.com>
+   ```
+
+   The certificate expires after 90 days. Restart the add-on regularly (e.g. with a monthly automation) to renew it.
+
+2. **Reverse proxy:** install the *NGINX Home Assistant SSL proxy* add-on, keep port 443 and start it:
+
+   ```yaml
+   domain: ha.example.com
+   certfile: fullchain.pem
+   keyfile: privkey.pem
+   ```
+
+3. **Let Home Assistant trust the proxy** in `configuration.yaml`, then restart Home Assistant:
+
+   ```yaml
+   http:
+     use_x_forwarded_for: true
+     trusted_proxies:
+       - 172.30.33.0/24   # the add-on network
+   ```
+
+4. **Split DNS:** add a local DNS record (type A) in your router: `ha.example.com` → `192.168.1.10`. In UniFi, for example, that is a DNS policy of type *Host (A)*. At home, the name now points to Home Assistant directly; outside it keeps pointing to your tunnel or public address.
+
+5. **Check** on a device in your home Wi-Fi: `https://ha.example.com` opens Home Assistant with a valid certificate, and the talk card shows no https hint.
+
+6. **Companion app:** *Settings → Companion app → (your server)*. Set both the internal and the external URL to `https://ha.example.com`. Then reset the frontend cache (*Troubleshooting → Reset frontend cache*).
+
+Done: at home the app talks to Home Assistant locally over https, so the talk button works there too, even without internet.
+</details>
 
 **Send audio** to `POST /api/blink_plus/talk/<camera entity id>`. It needs a Home Assistant login (e.g. a [long-lived access token](https://developers.home-assistant.io/docs/auth_api/#long-lived-access-token)) whose user may control that camera.
 
