@@ -63,3 +63,36 @@ jobs:
       - name: blinkpy load reductions (patched, gated, safe fallback)
         working-directory: tests
         run: python3 test_blinkpy_patches.py ../custom_components/blink_plus/blinkpy_patches.py
+
+  home-assistant:
+    name: Current Home Assistant (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # pip picks the newest Home Assistant that supports this Python.
+        python: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install Home Assistant (+ camera/stream/ffmpeg requirements)
+        run: |
+          pip install homeassistant "blinkpy>=0.25.5"
+          python3 - > ha-requirements.txt <<'PY'
+          import json, os, homeassistant.components as comps
+          base = os.path.dirname(comps.__file__)
+          for comp in ("camera", "stream", "ffmpeg"):
+              with open(os.path.join(base, comp, "manifest.json")) as f:
+                  print("\n".join(json.load(f).get("requirements", [])))
+          PY
+          pip install -r ha-requirements.txt
+          python3 -c "import homeassistant.const as c; print('Home Assistant', c.__version__)"
+      - name: Import every module, call the actions through Home Assistant
+        working-directory: tests
+        run: |
+          ffmpeg -loglevel error -f lavfi -i sine=frequency=300:duration=1 -ac 2 -ar 48000 talk_in.wav
+          python3 test_ha_current.py .. .

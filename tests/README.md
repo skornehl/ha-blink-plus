@@ -19,4 +19,5 @@ python3 test_talk.py    . ../custom_components/blink_plus/immis.py ../custom_com
 python3 test_archive.py ../custom_components/blink_plus/archive.py            # clip archive: USB (no plan) + cloud (plan), retries, resume,
                                                                                # clips skipped after 3 failed runs, failed cloud clips, unload, no source
 python3 test_blinkpy_patches.py ../custom_components/blink_plus/blinkpy_patches.py  # load reductions: gated to Blink Plus, safe if blinkpy changed
+python3 test_ha_current.py .. .                                              # needs Home Assistant installed: imports everything, calls the actions
 ```

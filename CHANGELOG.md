@@ -2,6 +2,14 @@
 
 All notable changes to Blink Plus. The project follows [Semantic Versioning](https://semver.org/). It's pre-1.0, so options and behaviour may still change between minor versions.
 
+## [Unreleased]
+
+### Fixed
+- `blink_plus.play_audio` failed at once ("'HomeAssistant' object has no attribute 'hass'") on current Home Assistant, which dropped the `hass` argument of `service.async_extract_entity_ids`. It now works with old and new versions. A new CI job runs the actions through the newest Home Assistant, so such changes show up there first.
+
+### Changed
+- The muted command-done debug line also shows what caused the error (aiohttp often wraps the real OS error in a bare `ClientConnectionError`).
+
 ## [0.5.2] - 2026-11-12
 
 ### Changed
