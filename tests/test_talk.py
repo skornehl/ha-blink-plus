@@ -392,9 +392,12 @@ async def main():
     async def flaky_post(blink, url, data=None, **kw):
         posts.append(url)
         if len(posts) == 1:  # stale keep-alive: blinkpy logs ERROR, returns None
+            # aiohttp style: a bare connection error wrapping the OS error
+            bare = ConnectionError()
+            bare.__cause__ = ConnectionResetError(104, "Connection reset by peer")
             blinkpy_log.error(
                 "Connection error. Endpoint %s possibly down or throttled. Error: %s",
-                url, ConnectionResetError(),
+                url, bare,
             )
             return None
         return {}
@@ -412,7 +415,9 @@ async def main():
     assert not [r for r in records if r.name == "blinkpy.auth"], "blinkpy ERROR leaked"
     muted = [r.getMessage() for r in records if r.name == "immis" and "muted" in r.getMessage()]
     print(f"  debug: {muted[0]}")
-    assert len(muted) == 3 and "builtins.ConnectionResetError: ConnectionResetError()" in muted[0], muted
+    assert len(muted) == 3, muted
+    assert "builtins.ConnectionError: ConnectionError() <- builtins.ConnectionResetError: " \
+        "ConnectionResetError(104, 'Connection reset by peer')" in muted[0], muted[0]
     assert all(r.levelno == logging.DEBUG for r in records if r.name == "immis" and "muted" in r.getMessage())
     blinkpy_log.error("a real blinkpy error elsewhere")
     assert [r for r in records if r.name == "blinkpy.auth"], "filter must only mute our calls"

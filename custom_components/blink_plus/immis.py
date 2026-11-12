@@ -79,9 +79,21 @@ class _QuietBestEffort(logging.Filter):
         _LOGGER.debug(
             "blinkpy (muted, best effort): %s [%s]",
             record.getMessage(),
-            f"{type(err).__module__}.{type(err).__qualname__}: {err!r}" if err else "-",
+            _describe(err) if err else "-",
         )
         return False
+
+
+def _describe(err: BaseException) -> str:
+    """Type and repr of an exception and what caused it (aiohttp often wraps
+    the real OS error in a bare ClientConnectionError)."""
+    parts = []
+    seen: set[int] = set()
+    while err is not None and id(err) not in seen and len(parts) < 4:
+        seen.add(id(err))
+        parts.append(f"{type(err).__module__}.{type(err).__qualname__}: {err!r}")
+        err = err.__cause__ or err.__context__
+    return " <- ".join(parts)
 
 
 logging.getLogger("blinkpy.auth").addFilter(_QuietBestEffort())

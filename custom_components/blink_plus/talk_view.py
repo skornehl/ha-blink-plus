@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import aclosing
+import inspect
 import os
 import tempfile
 
@@ -147,9 +148,22 @@ async def _chain(head: bytes, request: web.Request) -> AsyncIterator[bytes]:
         yield chunk
 
 
+async def extract_entity_ids(hass: HomeAssistant, call: ServiceCall) -> set[str]:
+    """Entity ids targeted by a service call, on old and new Home Assistant.
+
+    Home Assistant dropped the ``hass`` argument of
+    ``service.async_extract_entity_ids`` (it now takes the call only).
+    """
+    extract = service.async_extract_entity_ids
+    first = next(iter(inspect.signature(extract).parameters), None)
+    if first == "hass":
+        return await extract(hass, call)
+    return await extract(call)
+
+
 async def async_handle_play_audio(hass: HomeAssistant, call: ServiceCall) -> None:
     """blink_plus.play_audio: play a file on each targeted camera's speaker."""
-    entity_ids = await service.async_extract_entity_ids(hass, call)
+    entity_ids = await extract_entity_ids(hass, call)
     if call.context.user_id:
         user = await hass.auth.async_get_user(call.context.user_id)
         if user is None:
