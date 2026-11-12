@@ -212,7 +212,26 @@ Restart, pair each accessory with the code from the HA notification (Home app �
 
 ## Two-way talk
 
-Talk works like in the Blink app: **only while the camera's live view is open** (someone is watching it in HA, HomeKit, go2rtc …). It rides that live view session; Blink Plus never wakes a camera just to talk. One person talks to a camera at a time, and one talk ends after **60 seconds**.
+Talk works like in the Blink app: **only while the camera's live view is open** (someone is watching it in HA, HomeKit, go2rtc …, or `blink_plus.start_live_view` opened it). It rides that live view session; Blink Plus never wakes a camera on its own just to talk. One person talks to a camera at a time, and one talk ends after **60 seconds**.
+
+**Open the live view first** with `blink_plus.start_live_view`. It connects to the camera's live view like a player and keeps it open for `seconds` (default 60, at most the *live view time limit*), or until `blink_plus.stop_live_view`. Calling it again extends that time; there is one such hold per camera. It returns per camera `state`, `holding`, `seconds` left, `cooldown_s` and `last_error`. If `cooldown_s` is above 0, the camera is in cool-down (another camera on the same sync module just took over, it hit the time limit, or the last try failed) and nothing was opened; try again after that many seconds.
+
+```yaml
+# doorbell pressed: wake the camera, wait until it streams, then speak
+- action: blink_plus.start_live_view
+  target:
+    entity_id: camera.front_door
+  data:
+    seconds: 90
+- wait_template: "{{ is_state_attr('camera.front_door', 'live_view_state', 'streaming') }}"
+  timeout: 40
+  continue_on_timeout: false
+- action: blink_plus.play_audio
+  target:
+    entity_id: camera.front_door
+  data:
+    file_path: /media/sounds/be_right_there.mp3
+```
 
 **Play a sound or a recorded message** (any format ffmpeg reads, from an [allowed folder](https://www.home-assistant.io/integrations/homeassistant/#allowlist_external_dirs) such as `/media`):
 
@@ -236,6 +255,9 @@ cameras:
 ```
 
 - Press **Live with sound** to open the live view (it doesn't start on its own, so opening the dashboard never wakes a camera). Unmute with the speaker icon in the picture.
+- The card wakes the camera with `start_live_view` first and attaches the player only once the camera streams; a battery camera needs 5–16 s to wake, and a player that starts cold often gives up before the stream exists. While the card shows the live view it keeps renewing that hold; **Hang up** ends it.
+- If the camera is in cool-down, the card says so (*Camera busy (another live view on the same sync module), retrying in N s*, or why the last try failed) and tries again by itself when the cool-down is over, for up to 40 s. If the player shows no picture 15 s after it was attached, the card recreates it once.
+- The live view plays inside the dashboard (hls.js or WebRTC), also in the Companion app, so the card can tell whether a picture arrived. `exoplayer: true` in the card config uses the Companion app's native Android player (ExoPlayer) instead.
 - Browsers only allow the microphone in a **secure context**: open Home Assistant over `https://` (in the Companion app, use the https address at home too). Over plain `http://` the card still shows the live view with sound, but can't record.
 - For a doorbell notification, link to the dashboard view with `?camera=camera.front_door&live=1`: the card picks that camera and starts the live view right away.
 - The recording goes to the endpoint below, so the user needs control permission for the camera, not admin rights.
@@ -303,7 +325,8 @@ After you close a camera in HA, it's released within about **35 seconds** (HA ke
 
 | Action | |
 |---|---|
-| `blink_plus.stop_live_view` | End a camera's live view now |
+| `blink_plus.start_live_view` | Open a camera's live view and keep it open (`seconds`, default 60, at most the live view time limit) so players and talk find it warm; returns state and cool-down. See [Two-way talk](#two-way-talk) |
+| `blink_plus.stop_live_view` | End a camera's live view now (also ends `start_live_view`) |
 | `blink_plus.play_audio` | Play an audio file through the camera speaker (`file_path`); only while its live view is open, max. 60 s. Runs alongside other camera actions. See [Two-way talk](#two-way-talk) |
 | `blink_plus.archive_clips` | Copy new clips to the archive folder now (`hours`, `max_clips`); returns a summary |
 | `blink_plus.reset_archive` | Forget what was copied to the current folder; the next run copies everything again |
@@ -370,6 +393,7 @@ logger:
 - [x] Clip archive to a folder / PC (cloud and USB)
 - [ ] Snooze, chime test, lights, Mini-as-chime
 - [x] Two-way talk (during live view: `blink_plus.play_audio`, an authenticated audio endpoint and a push-to-talk dashboard card)
+- [x] Open a live view from an automation (`blink_plus.start_live_view`)
 - [ ] Two-way talk from the dashboard (microphone button)
 
 ## Development

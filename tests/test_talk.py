@@ -375,7 +375,7 @@ async def main():
 
     # 10. Closing the command is best effort: blinkpy's ERROR logs for these
     # calls are muted (only for them), and a missing answer is retried once.
-    print("10. quiet, retried command done")
+    print("10. closing the command (404 = already ended, quiet, retried)")
     import logging
 
     records = []
@@ -387,41 +387,74 @@ async def main():
     logging.getLogger().addHandler(Grab())
     logging.getLogger("immis").setLevel(logging.DEBUG)
     blinkpy_log = logging.getLogger("blinkpy.auth")
-    posts = []
 
-    async def flaky_post(blink, url, data=None, **kw):
-        posts.append(url)
-        if len(posts) == 1:  # stale keep-alive: blinkpy logs ERROR, returns None
-            # aiohttp style: a bare connection error wrapping the OS error
-            bare = ConnectionError()
-            bare.__cause__ = ConnectionResetError(104, "Connection reset by peer")
-            blinkpy_log.error(
-                "Connection error. Endpoint %s possibly down or throttled. Error: %s",
-                url, bare,
-            )
-            return None
-        return {}
+    class Resp:
+        def __init__(self, status):
+            self.status, self.released = status, False
 
-    async def legacy_done(blink, net, cid):
-        posts.append("legacy")
-        blinkpy_log.error("Connection error. Endpoint legacy possibly down or throttled.")
-        return None
+        def release(self):
+            self.released = True
 
-    immis.blink_api.http_post, immis.blink_api.request_command_done = flaky_post, legacy_done
-    done = immis.BlinkLiveViewServer(Blink(), Cam())
-    await done._command_done(42, 4711)
-    print(f"  requests: {[p.rsplit('/', 3)[-3:] if p != 'legacy' else p for p in posts]}")
-    assert len(posts) == 4, posts  # v1 twice (retry), legacy twice
-    assert not [r for r in records if r.name == "blinkpy.auth"], "blinkpy ERROR leaked"
-    muted = [r.getMessage() for r in records if r.name == "immis" and "muted" in r.getMessage()]
+    def bare_error():
+        # what blinkpy logs for an aiohttp error that wraps the OS error
+        err = ConnectionError()
+        err.__cause__ = ConnectionResetError(104, "Connection reset by peer")
+        return err
+
+    async def close_with(*answers):
+        """answers: one per request, an HTTP status or None (= network error)."""
+        records.clear()
+        answers, posts, resps = list(answers), [], []
+
+        async def post(blink, url, data=None, json=True, **kw):
+            assert json is False, "must ask blinkpy for the raw response"
+            posts.append("v1" if "/api/v1/" in url else "legacy")
+            answer = answers.pop(0)
+            if answer is None:
+                blinkpy_log.error(
+                    "Connection error. Endpoint %s possibly down or throttled. Error: %s",
+                    url, bare_error(),
+                )
+                return None
+            resps.append(Resp(answer))
+            return resps[-1]
+
+        immis.blink_api.http_post = post
+        await immis.BlinkLiveViewServer(Blink(), Cam())._command_done(42, 4711)
+        assert not answers, f"unused answers {answers}"
+        assert all(r.released for r in resps), "response not released"
+        info = [r for r in records if r.name == "immis" and r.levelno >= logging.INFO]
+        muted = [r.getMessage() for r in records if r.name == "immis" and "muted" in r.getMessage()]
+        assert not [r for r in records if r.name == "blinkpy.auth"], "blinkpy ERROR leaked"
+        return posts, info, muted
+
+    # Blink already ended the command after IMMIS STOP: 404, one request, silent.
+    posts, info, muted = await close_with(404)
+    print(f"  404: {posts}, info lines: {len(info)}")
+    assert posts == ["v1"] and not info and not muted
+    assert any("already ended" in r.getMessage() for r in records)
+
+    # Network error, then the retry gets through: no legacy call.
+    posts, info, muted = await close_with(None, 200)
+    print(f"  network error, then 200: {posts}")
+    assert posts == ["v1", "v1"] and not info and len(muted) == 1
     print(f"  debug: {muted[0]}")
-    assert len(muted) == 3, muted
     assert "builtins.ConnectionError: ConnectionError() <- builtins.ConnectionResetError: " \
         "ConnectionResetError(104, 'Connection reset by peer')" in muted[0], muted[0]
-    assert all(r.levelno == logging.DEBUG for r in records if r.name == "immis" and "muted" in r.getMessage())
+
+    # Server error on the app endpoint: try the legacy one.
+    posts, info, muted = await close_with(500, 200)
+    print(f"  500, then legacy 200: {posts}")
+    assert posts == ["v1", "legacy"] and not info
+
+    # No answer at all: both endpoints twice, then one info line.
+    posts, info, muted = await close_with(None, None, None, None)
+    print(f"  no answer: {posts}, info: {info[0].getMessage() if info else None}")
+    assert posts == ["v1", "v1", "legacy", "legacy"] and len(info) == 1 and len(muted) == 4
+
+    records.clear()
     blinkpy_log.error("a real blinkpy error elsewhere")
     assert [r for r in records if r.name == "blinkpy.auth"], "filter must only mute our calls"
-
 
 asyncio.run(main())
 print("PASS talk")
