@@ -2,7 +2,7 @@
 
 All notable changes to Blink Plus. The project follows [Semantic Versioning](https://semver.org/). It's pre-1.0, so options and behaviour may still change between minor versions.
 
-## [Unreleased]
+## [0.6.0] - 2026-11-12
 
 ### Added
 - `blink_plus.start_live_view` action: opens a camera's live view and keeps it open for `seconds` (default 60, at most the live view time limit) or until `blink_plus.stop_live_view`. It connects like a player, so the Blink session is already streaming when the real player (or `play_audio`) comes. One hold per camera; calling it again extends it. Returns per camera `state`, `holding`, `seconds`, `cooldown_s` and `last_error`; a camera in cool-down is not touched. Like `play_audio` it runs alongside other camera actions.

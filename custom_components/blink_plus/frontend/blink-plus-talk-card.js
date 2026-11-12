@@ -33,7 +33,7 @@
  * plays it through the camera speaker while the live view is open.
  * Browsers only allow the microphone in a secure context (https).
  */
-const CARD_VERSION = "0.5.0";
+const CARD_VERSION = "0.6.0";
 const MAX_MS = 30000;
 const MIN_MS = 400;
 const LIVE_WAIT_MS = 40000;
