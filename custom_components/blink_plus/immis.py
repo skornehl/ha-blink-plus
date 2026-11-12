@@ -50,6 +50,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 import contextvars
+import inspect
 from dataclasses import dataclass, field
 import json
 import logging
@@ -906,31 +907,62 @@ class BlinkLiveViewServer:
     async def _command_done(self, network_id: Any, command_id: Any) -> None:
         if not command_id:
             return
-        # The app's endpoint (CommandApi .../commands/{id}/done) and blinkpy's
-        # legacy one; both are harmless if the command already ended.
-        url = (
-            f"{self.blink.urls.base_url}/api/v1/accounts/{self.blink.account_id}"
-            f"/networks/{network_id}/commands/{command_id}/done"
+        # The app's endpoint (CommandApi .../commands/{id}/done), then blinkpy's
+        # legacy one only if the first got no usable answer. After an IMMIS
+        # STOP Blink has usually ended the command already and answers 404;
+        # that counts as closed. We ask for the raw response (json=False)
+        # because blinkpy turns a 404 into a bare ClientConnectionError.
+        base = self.blink.urls.base_url
+        endpoints = (
+            (
+                "command done (v1)",
+                f"{base}/api/v1/accounts/{self.blink.account_id}"
+                f"/networks/{network_id}/commands/{command_id}/done",
+                "{}",
+            ),
+            ("command done", f"{base}/network/{network_id}/command/{command_id}/done/", None),
         )
-        v1 = await self._best_effort(
-            "command done (v1)", lambda: blink_api.http_post(self.blink, url, data="{}")
-        )
-        legacy = await self._best_effort(
-            "command done",
-            lambda: blink_api.request_command_done(self.blink, network_id, command_id),
-        )
-        if v1 is None and legacy is None:
-            _LOGGER.info(
-                "%s: Blink did not answer when closing the live view command; "
-                "it ends on its own after the session time limit",
-                self.name,
+        for what, url, data in endpoints:
+            status = await self._best_effort(
+                what, lambda url=url, data=data: self._post_status(url, data)
             )
+            if status is not None and (status < 300 or status == 404):
+                _LOGGER.debug(
+                    "%s: %s -> %s%s",
+                    self.name,
+                    what,
+                    status,
+                    " (Blink had already ended it)" if status == 404 else "",
+                )
+                return
+            if status is not None:
+                _LOGGER.debug("%s: %s -> HTTP %s", self.name, what, status)
+        _LOGGER.info(
+            "%s: Blink did not answer when closing the live view command; "
+            "it ends on its own after the session time limit",
+            self.name,
+        )
+
+    async def _post_status(self, url: str, data: str | None) -> int | None:
+        """POST and return the HTTP status (None: no response at all)."""
+        resp = await blink_api.http_post(self.blink, url, data=data, json=False)
+        if resp is None:
+            return None
+        status = getattr(resp, "status", None)
+        release = getattr(resp, "release", None)
+        if callable(release):
+            result = release()
+            if inspect.isawaitable(result):
+                await result
+        # Something that answered without a status (e.g. already parsed JSON)
+        # still means Blink took the request.
+        return 200 if status is None else int(status)
 
     async def _best_effort(
         self, what: str, call: Callable[[], Awaitable[Any]], attempts: int = 2
     ) -> Any:
-        """Run a Blink request quietly; retry once (e.g. a stale keep-alive
-        connection after a long live view). Return None if it never answered."""
+        """Run a Blink request quietly; retry once if there was no answer at
+        all (network error). Return None if it never answered."""
         for attempt in range(1, attempts + 1):
             token = _QUIET_BLINKPY.set(True)
             try:

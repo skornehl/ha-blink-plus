@@ -9,6 +9,7 @@ All notable changes to Blink Plus. The project follows [Semantic Versioning](htt
 
 ### Fixed
 - Talk card: **Live with sound** now starts from cold, also in the Companion app. The card first wakes the camera with `start_live_view`, waits until it streams and only then attaches the player. Before, the player started at once and (as the native ExoPlayer in the Companion app) gave up while a battery camera was still waking, so the live view only worked if the stream was already warm.
+- Closing a live view command no longer fails every time. After the IMMIS STOP, Blink has already ended the command and answers the `…/done` request with HTTP 404, which blinkpy reports as a connection error without text. Blink Plus now reads the status itself: 404 counts as closed, so there is one request instead of four, no retry and no "did not answer" info line. The legacy endpoint is only tried if the app's endpoint gives no usable answer.
 
 ### Changed
 - Talk card: if the camera is in cool-down (another camera on the same sync module just took over, or the last try failed), the card says so with the seconds left, or shows why the live view failed, instead of only *Connecting …*. It tries again by itself after the cool-down, for up to 40 s.
