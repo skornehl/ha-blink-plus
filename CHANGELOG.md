@@ -2,6 +2,11 @@
 
 All notable changes to Blink Plus. The project follows [Semantic Versioning](https://semver.org/). It's pre-1.0, so options and behaviour may still change between minor versions.
 
+## [Unreleased]
+
+### Fixed
+- Closing a live view command no longer fails every time. After the IMMIS STOP, Blink has already ended the command and answers the `…/done` request with HTTP 404, which blinkpy reports as a connection error without text. Blink Plus now reads the status itself: 404 counts as closed, so there is one request instead of four, no retry and no "did not answer" info line. The legacy endpoint is only tried if the app's endpoint gives no usable answer.
+
 ## [0.5.3] - 2026-11-12
 
 ### Fixed
