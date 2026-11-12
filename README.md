@@ -262,6 +262,16 @@ cameras:
 - For a doorbell notification, link to the dashboard view with `?camera=camera.front_door&live=1`: the card picks that camera and starts the live view right away.
 - The recording goes to the endpoint below, so the user needs control permission for the camera, not admin rights.
 
+**Talk card in the Companion app.** At home, the app switches to its *internal URL* (often `http://homeassistant.local:8123`); on the road it uses the external one. Two things follow from that:
+
+- **Talking needs https on both addresses.** The Android and iOS web views only allow the microphone in a secure context. Over an `http://` internal URL you can watch and listen, but the talk button can't record.
+- **The card can be missing on just one of the two addresses** (*Custom element does not exist: blink-plus-talk-card*). The card is loaded together with the Home Assistant page, and the app keeps its own cached page per address. One cached from before Blink Plus was installed or updated doesn't know the card yet. See [Troubleshooting](#troubleshooting).
+
+To make both work at home, either:
+
+- **Always use the https address:** in the app, *Settings → Companion app → (your server)*, clear the internal URL (or remove your home Wi-Fi networks). The app then uses the external https address (Home Assistant Cloud, a Cloudflare tunnel …) everywhere. Downside: at home the traffic also goes through the internet.
+- **Or serve https locally under the external name:** a reverse proxy in front of Home Assistant (e.g. the NGINX SSL add-on) with a Let's Encrypt certificate via DNS-01, plus a DNS entry in your router that points the external hostname to Home Assistant's local IP (split DNS). Set the app's internal and external URL to `https://<that hostname>`. Talk then stays local and works without internet.
+
 **Send audio** to `POST /api/blink_plus/talk/<camera entity id>`. It needs a Home Assistant login (e.g. a [long-lived access token](https://developers.home-assistant.io/docs/auth_api/#long-lived-access-token)) whose user may control that camera.
 
 - **ADTS AAC (AAC-LC, 16 kHz, mono)** is played as it arrives, so it can be a live stream.
@@ -345,6 +355,17 @@ After you close a camera in HA, it's released within about **35 seconds** (HA ke
 | `live_view_url` | Local MPEG-TS URL for go2rtc / VLC |
 
 ## Troubleshooting
+
+<details>
+<summary><b>"Custom element does not exist: blink-plus-talk-card"</b></summary>
+
+The card ships with the integration and is loaded with the Home Assistant page, so the page has to be loaded fresh once after installing or updating Blink Plus.
+
+* Browser: reload the page (Ctrl+Shift+R / Cmd+Shift+R).
+* Companion app: *Settings → Companion app → Troubleshooting → Reset frontend cache*, or close and reopen the app.
+* Only at home in the app? The app uses its internal URL there and has its own cached page for it. See [Talk card in the Companion app](#two-way-talk).
+* Please don't add the card as a dashboard resource as a workaround. A resource with `?v=…` stays on that version after the next update, and the old card may stay active. If you added one, remove it once the card loads again.
+</details>
 
 <details>
 <summary><b>"Invalid authentication" when signing in</b></summary>
