@@ -262,62 +262,61 @@ cameras:
 - For a doorbell notification, link to the dashboard view with `?camera=camera.front_door&live=1`: the card picks that camera and starts the live view right away.
 - The recording goes to the endpoint below, so the user needs control permission for the camera, not admin rights.
 
+<details>
+<summary><b>Example: the doorbell rings, you tap the notification and talk</b></summary>
+
+A dashboard *Intercom* (URL `dashboard-intercom`) with a view `door` that holds the card:
+
+```yaml
+views:
+  - title: Door
+    path: door
+    cards:
+      - type: custom:blink-plus-talk-card
+        title: Front door
+        cameras:
+          - entity: camera.front_door
+            name: Front door
+          - entity: camera.yard
+            name: Yard
+```
+
+An automation that wakes the doorbell camera when it rings and sends a notification that opens this view:
+
+```yaml
+alias: Doorbell – talk card
+triggers:
+  - trigger: state
+    entity_id: binary_sensor.front_door_motion  # your doorbell sensor
+    to: "on"
+actions:
+  # Optional: wake the camera now, so the live view is already running when
+  # you tap the notification (the card would otherwise wait 5–16 s for it).
+  # It ends after 90 s if nobody opens it.
+  - action: blink_plus.start_live_view
+    target:
+      entity_id: camera.front_door
+    data:
+      seconds: 90
+  - action: notify.mobile_app_my_phone
+    data:
+      title: Doorbell
+      message: Someone is at the front door
+      data:
+        image: /api/camera_proxy/camera.front_door
+        url: /dashboard-intercom/door?camera=camera.front_door&live=1          # iOS
+        clickAction: /dashboard-intercom/door?camera=camera.front_door&live=1  # Android
+```
+
+Tap the notification: the card opens on the front door and starts the live view with sound. Unmute with the speaker icon if needed, hold **Hold to talk**, speak, release. **Hang up** ends the live view.
+</details>
+
 **Talk card in the Companion app.** At home, the app switches to its *internal URL* (often `http://homeassistant.local:8123`); on the road it uses the external one. Two things follow from that:
 
 - **Talking needs https on both addresses.** The Android and iOS web views only allow the microphone in a secure context. Over an `http://` internal URL you can watch and listen, but the talk button can't record.
 - **The card can be missing on just one of the two addresses** (*Custom element does not exist: blink-plus-talk-card*). The card is loaded together with the Home Assistant page, and the app keeps its own cached page per address. One cached from before Blink Plus was installed or updated doesn't know the card yet. See [Troubleshooting](#troubleshooting).
 
-To make both work at home, either:
-
-- **Always use the https address** (quickest): in the app, *Settings → Companion app → (your server)*, clear the internal URL (or remove your home Wi-Fi networks), then *Troubleshooting → Reset frontend cache*. The app then uses the external https address (Home Assistant Cloud, a Cloudflare tunnel …) everywhere. Downside: at home the traffic also goes through the internet.
-- **Or serve https locally under the external name:** a reverse proxy in front of Home Assistant (e.g. the NGINX SSL add-on) with a Let's Encrypt certificate via DNS-01, plus a DNS entry in your router that points the external hostname to Home Assistant's local IP (split DNS). Set the app's internal and external URL to `https://<that hostname>`. Talk then stays local and works without internet.
-
-<details>
-<summary><b>Example: local https with the NGINX and Let's Encrypt add-ons</b></summary>
-
-Assumptions: Home Assistant OS at `192.168.1.10`, the external name `ha.example.com` (its DNS zone is at Cloudflare here; Let's Encrypt supports many other DNS providers), and a router that can hold local DNS records. Replace these with your own values.
-
-1. **Certificate:** install the *Let's Encrypt* add-on. Configure it for the DNS-01 challenge, so Home Assistant doesn't have to be reachable from the internet, then start it once:
-
-   ```yaml
-   domains:
-     - ha.example.com
-   email: you@example.com
-   keyfile: privkey.pem
-   certfile: fullchain.pem
-   challenge: dns
-   dns:
-     provider: dns-cloudflare
-     cloudflare_api_token: <API token with Zone → DNS → Edit for example.com>
-   ```
-
-   The certificate expires after 90 days. Restart the add-on regularly (e.g. with a monthly automation) to renew it.
-
-2. **Reverse proxy:** install the *NGINX Home Assistant SSL proxy* add-on, keep port 443 and start it:
-
-   ```yaml
-   domain: ha.example.com
-   certfile: fullchain.pem
-   keyfile: privkey.pem
-   ```
-
-3. **Let Home Assistant trust the proxy** in `configuration.yaml`, then restart Home Assistant:
-
-   ```yaml
-   http:
-     use_x_forwarded_for: true
-     trusted_proxies:
-       - 172.30.33.0/24   # the add-on network
-   ```
-
-4. **Split DNS:** add a local DNS record (type A) in your router: `ha.example.com` → `192.168.1.10`. In UniFi, for example, that is a DNS policy of type *Host (A)*. At home, the name now points to Home Assistant directly; outside it keeps pointing to your tunnel or public address.
-
-5. **Check** on a device in your home Wi-Fi: `https://ha.example.com` opens Home Assistant with a valid certificate, and the talk card shows no https hint.
-
-6. **Companion app:** *Settings → Companion app → (your server)*. Set both the internal and the external URL to `https://ha.example.com`. Then reset the frontend cache (*Troubleshooting → Reset frontend cache*).
-
-Done: at home the app talks to Home Assistant locally over https, so the talk button works there too, even without internet.
-</details>
+So give the app an https address for home too; how you set that up is up to you. The quickest way: in the app, *Settings → Companion app → (your server)*, clear the internal URL, so the app uses its external https address everywhere, then *Troubleshooting → Reset frontend cache*.
 
 **Send audio** to `POST /api/blink_plus/talk/<camera entity id>`. It needs a Home Assistant login (e.g. a [long-lived access token](https://developers.home-assistant.io/docs/auth_api/#long-lived-access-token)) whose user may control that camera.
 
