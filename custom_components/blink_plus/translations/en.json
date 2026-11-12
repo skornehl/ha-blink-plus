@@ -116,6 +116,9 @@
     "talk_failed": {
       "message": "Two-way talk failed: {error}"
     },
+    "talk_no_camera": {
+      "message": "Choose a Blink Plus camera for two-way talk."
+    },
     "talk_no_file": {
       "message": "Audio file {target} not found."
     },

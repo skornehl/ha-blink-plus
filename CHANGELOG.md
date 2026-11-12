@@ -2,6 +2,13 @@
 
 All notable changes to Blink Plus. The project follows [Semantic Versioning](https://semver.org/). It's pre-1.0, so options and behaviour may still change between minor versions.
 
+## [0.5.1] - 2026-11-12
+
+### Fixed
+- `blink_plus.play_audio` no longer waits for other actions on Blink Plus cameras. It used to queue behind them, e.g. behind a `camera.record` that opened the live view, so the announcement came only after the recording ended.
+- `live_view_token_used` is set as soon as the live view streams. Before, it only showed after the session had ended.
+- Closing a live view command no longer logs blinkpy ERRORs ("… possibly down or throttled"). These calls are best effort: Blink Plus retries once and logs at debug level; only if Blink never answers does it log one info line.
+
 ## [0.5.0] - 2026-11-12
 
 ### Added
