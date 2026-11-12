@@ -2,6 +2,11 @@
 
 All notable changes to Blink Plus. The project follows [Semantic Versioning](https://semver.org/). It's pre-1.0, so options and behaviour may still change between minor versions.
 
+## [0.5.2] - 2026-11-12
+
+### Changed
+- When Blink Plus mutes blinkpy's "possibly down or throttled" error while closing a live view command, it now logs it at debug level together with the exception type. blinkpy's own message often ends in an empty `Error: `, so the type shows what actually happened.
+
 ## [0.5.1] - 2026-11-12
 
 ### Fixed

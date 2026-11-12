@@ -70,7 +70,18 @@ _QUIET_BLINKPY = contextvars.ContextVar("blink_plus_quiet_blinkpy", default=Fals
 
 class _QuietBestEffort(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
-        return not _QUIET_BLINKPY.get()
+        if not _QUIET_BLINKPY.get():
+            return True
+        # Keep what blinkpy knew, at debug level. Its message often ends in an
+        # empty "Error: " (an exception without text), so log type and repr.
+        args = record.args if isinstance(record.args, tuple) else ()
+        err = next((a for a in args if isinstance(a, BaseException)), None)
+        _LOGGER.debug(
+            "blinkpy (muted, best effort): %s [%s]",
+            record.getMessage(),
+            f"{type(err).__module__}.{type(err).__qualname__}: {err!r}" if err else "-",
+        )
+        return False
 
 
 logging.getLogger("blinkpy.auth").addFilter(_QuietBestEffort())

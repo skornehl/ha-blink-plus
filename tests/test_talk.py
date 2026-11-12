@@ -385,13 +385,17 @@ async def main():
             records.append(record)
 
     logging.getLogger().addHandler(Grab())
+    logging.getLogger("immis").setLevel(logging.DEBUG)
     blinkpy_log = logging.getLogger("blinkpy.auth")
     posts = []
 
     async def flaky_post(blink, url, data=None, **kw):
         posts.append(url)
         if len(posts) == 1:  # stale keep-alive: blinkpy logs ERROR, returns None
-            blinkpy_log.error("Connection error. Endpoint %s possibly down or throttled.", url)
+            blinkpy_log.error(
+                "Connection error. Endpoint %s possibly down or throttled. Error: %s",
+                url, ConnectionResetError(),
+            )
             return None
         return {}
 
@@ -406,6 +410,10 @@ async def main():
     print(f"  requests: {[p.rsplit('/', 3)[-3:] if p != 'legacy' else p for p in posts]}")
     assert len(posts) == 4, posts  # v1 twice (retry), legacy twice
     assert not [r for r in records if r.name == "blinkpy.auth"], "blinkpy ERROR leaked"
+    muted = [r.getMessage() for r in records if r.name == "immis" and "muted" in r.getMessage()]
+    print(f"  debug: {muted[0]}")
+    assert len(muted) == 3 and "builtins.ConnectionResetError: ConnectionResetError()" in muted[0], muted
+    assert all(r.levelno == logging.DEBUG for r in records if r.name == "immis" and "muted" in r.getMessage())
     blinkpy_log.error("a real blinkpy error elsewhere")
     assert [r for r in records if r.name == "blinkpy.auth"], "filter must only mute our calls"
 
