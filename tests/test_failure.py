@@ -52,7 +52,8 @@ async def main():
     done = [c for c in calls if c[0].startswith("DONE") or (c[0] == "POST" and str(c[1]).endswith("/done"))]
     print(f"liveview commands sent: {len(lv)} (want 1) | TLS connections: {state['tls']} (want 1) | STOP sent: {state['stops']} (want 1) | command closed: {done}")
     assert len(lv) == 1 and state["tls"] == 1 and state["stops"] == 1, "retried or no STOP"
-    assert any(c[0] == "DONE-legacy" for c in done) and any(c[0] == "POST" for c in done)
+    # The app's endpoint answered, so the legacy one isn't needed.
+    assert any(c[0] == "POST" for c in done) and not any(c[0] == "DONE-legacy" for c in done)
     assert live.stats.as_dict()["live_view_cooldown_s"] > 60
     await live.async_stop(); srv.close()
 asyncio.run(main())
