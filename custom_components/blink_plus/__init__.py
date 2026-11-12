@@ -48,6 +48,7 @@ from .archive import ClipArchiver
 from .auth import BlinkPlusAuth
 from .blinkpy_patches import apply_blinkpy_patches
 from .immis import BlinkLiveViewServer, live_key
+from .live_hold import async_stop_hold
 from .session import async_blink_session
 from .services import async_setup_services
 from .talk_view import BlinkTalkView
@@ -296,6 +297,7 @@ async def _async_stop_live_servers(coordinator: BlinkUpdateCoordinator) -> None:
     """Stop every local live view server (ends running Blink sessions)."""
     for server in list(coordinator.live_servers.values()):
         try:
+            await async_stop_hold(server)
             await server.async_stop()
         except Exception:  # noqa: BLE001
             _LOGGER.debug("Stopping live view server failed", exc_info=True)

@@ -35,6 +35,9 @@
     "stop_live_view": {
       "service": "mdi:video-off"
     },
+    "start_live_view": {
+      "service": "mdi:video"
+    },
     "archive_clips": {
       "service": "mdi:folder-download"
     },

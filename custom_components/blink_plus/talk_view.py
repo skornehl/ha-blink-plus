@@ -1,8 +1,10 @@
-"""Two-way talk for Home Assistant: the HTTP endpoint and the play_audio action.
+"""Two-way talk for Home Assistant: the HTTP endpoint, the play_audio action
+and start_live_view (keeps a live view open, so talk and players find it warm).
 
-The action is a plain domain service, not an entity service: entity services
+The actions are plain domain services, not entity services: entity services
 of this platform run one at a time (``PARALLEL_UPDATES = 1``), so a running
-``camera.record`` would hold the speaker back until it finished.
+``camera.record`` would hold the speaker (or the live view) back until it
+finished.
 
 HTTP endpoint:
 
@@ -29,12 +31,13 @@ from contextlib import aclosing
 import inspect
 import os
 import tempfile
+from typing import Any
 
 from aiohttp import ClientError, web
 
 from homeassistant.auth.permissions.const import POLICY_CONTROL
 from homeassistant.components.http import KEY_HASS, HomeAssistantView
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse
 from homeassistant.exceptions import (
     HomeAssistantError,
     ServiceValidationError,
@@ -45,6 +48,7 @@ from homeassistant.helpers import service
 
 from .const import DOMAIN
 from .immis import BlinkLiveViewServer, TalkError
+from .live_hold import async_start_hold
 from .talk import (
     FRAME_SECONDS,
     MAX_UPLOAD,
@@ -161,8 +165,13 @@ async def extract_entity_ids(hass: HomeAssistant, call: ServiceCall) -> set[str]
     return await extract(call)
 
 
-async def async_handle_play_audio(hass: HomeAssistant, call: ServiceCall) -> None:
-    """blink_plus.play_audio: play a file on each targeted camera's speaker."""
+async def targeted_servers(
+    hass: HomeAssistant, call: ServiceCall, no_camera_key: str
+) -> list[BlinkLiveViewServer]:
+    """Live view servers of the targeted cameras, after the permission check.
+
+    Raises ``no_camera_key`` if none of the targets is a Blink Plus camera.
+    """
     entity_ids = await extract_entity_ids(hass, call)
     if call.context.user_id:
         user = await hass.auth.async_get_user(call.context.user_id)
@@ -180,10 +189,39 @@ async def async_handle_play_audio(hass: HomeAssistant, call: ServiceCall) -> Non
     ]
     if not servers:
         raise ServiceValidationError(
-            translation_domain=DOMAIN, translation_key="talk_no_camera"
+            translation_domain=DOMAIN, translation_key=no_camera_key
         )
-    for server in servers:
+    return servers
+
+
+async def async_handle_play_audio(hass: HomeAssistant, call: ServiceCall) -> None:
+    """blink_plus.play_audio: play a file on each targeted camera's speaker."""
+    for server in await targeted_servers(hass, call, "talk_no_camera"):
         await async_play_audio(hass, server, call.data["file_path"])
+
+
+async def async_handle_start_live_view(
+    hass: HomeAssistant, call: ServiceCall
+) -> ServiceResponse:
+    """blink_plus.start_live_view: open each targeted camera's live view and
+    keep it open for ``seconds`` (or until stop_live_view).
+
+    Returns per camera: ``state``, ``holding``, ``seconds`` (left),
+    ``cooldown_s`` (> 0: the camera refuses to start for that long, nothing
+    was opened) and ``last_error``.
+    """
+    seconds = call.data["seconds"]
+    result: dict[str, Any] = {}
+    for server in await targeted_servers(hass, call, "live_no_camera"):
+        name = f"{DOMAIN} live view hold {server.entity_id}"
+        result[str(server.entity_id)] = await async_start_hold(
+            server,
+            seconds,
+            create_task=lambda coro, name=name: hass.async_create_background_task(
+                coro, name
+            ),
+        )
+    return result
 
 
 async def async_play_audio(

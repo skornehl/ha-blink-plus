@@ -2,6 +2,19 @@
 
 All notable changes to Blink Plus. The project follows [Semantic Versioning](https://semver.org/). It's pre-1.0, so options and behaviour may still change between minor versions.
 
+## [Unreleased]
+
+### Added
+- `blink_plus.start_live_view` action: opens a camera's live view and keeps it open for `seconds` (default 60, at most the live view time limit) or until `blink_plus.stop_live_view`. It connects like a player, so the Blink session is already streaming when the real player (or `play_audio`) comes. One hold per camera; calling it again extends it. Returns per camera `state`, `holding`, `seconds`, `cooldown_s` and `last_error`; a camera in cool-down is not touched. Like `play_audio` it runs alongside other camera actions.
+
+### Fixed
+- Talk card: **Live with sound** now starts from cold, also in the Companion app. The card first wakes the camera with `start_live_view`, waits until it streams and only then attaches the player. Before, the player started at once and (as the native ExoPlayer in the Companion app) gave up while a battery camera was still waking, so the live view only worked if the stream was already warm.
+
+### Changed
+- Talk card: if the camera is in cool-down (another camera on the same sync module just took over, or the last try failed), the card says so with the seconds left, or shows why the live view failed, instead of only *Connecting …*. It tries again by itself after the cool-down, for up to 40 s.
+- Talk card: if the player shows no picture 15 s after it was attached, the card recreates it once.
+- Talk card: the live view plays inside the dashboard (hls.js / WebRTC) instead of the Companion app's native ExoPlayer, so the card can see whether a picture arrived. `exoplayer: true` in the card config switches back.
+
 ## [0.5.3] - 2026-11-12
 
 ### Fixed

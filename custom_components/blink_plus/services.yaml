@@ -42,6 +42,20 @@ stop_live_view:
       integration: blink_plus
       domain: camera
 
+start_live_view:
+  target:
+    entity:
+      integration: blink_plus
+      domain: camera
+  fields:
+    seconds:
+      default: 60
+      selector:
+        number:
+          min: 1
+          max: 14400
+          unit_of_measurement: s
+
 play_audio:
   target:
     entity:
