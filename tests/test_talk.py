@@ -299,6 +299,22 @@ async def main():
         sent = await talk.async_talk(live, chunks)
     assert sent <= 10, f"ffmpeg did not cut at max_seconds: {sent}"
 
+    # 7b. A browser recording (WebM/Opus, what the talk card sends): not ADTS,
+    # so the endpoint routes it through ffmpeg; ready ADTS goes straight on.
+    print("7b. browser recording (WebM/Opus)")
+    assert talk.is_adts(good) and not talk.is_adts(b"") and not talk.is_adts(b"\xff")
+    webm = os.path.join(TEST_DIR, "talk_in.webm")
+    made = subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=500:duration=1",
+                           "-ac", "1", "-ar", "48000", "-c:a", "libopus", webm])  # fmt: skip
+    if made.returncode:
+        print("  skipped: ffmpeg has no libopus")
+    else:
+        assert not talk.is_adts(open(webm, "rb").read(16)), "WebM must not look like ADTS"
+        async with aclosing(talk.ffmpeg_adts(webm)) as chunks:
+            sent = await talk.async_talk(live, chunks)
+        print(f"  WebM/Opus -> {sent} frames")
+        assert 14 <= sent <= 18, sent
+
     # 8. Live view ends mid-talk: the talk fails, nothing goes to a new session.
     print("8. live view ends mid-talk")
     running = asyncio.create_task(talk.async_talk(live, chunked(long)))

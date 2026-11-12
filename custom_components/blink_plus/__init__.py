@@ -3,17 +3,21 @@
 from copy import deepcopy
 from datetime import timedelta
 import logging
+from pathlib import Path
 from typing import Any
 
 from blinkpy.blinkpy import Blink
 
 from homeassistant.components import persistent_notification
+from homeassistant.components.frontend import add_extra_js_url
+from homeassistant.components.http import StaticPathConfig
 from homeassistant.const import CONF_SCAN_INTERVAL
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
 from homeassistant.helpers.typing import ConfigType
+from homeassistant.loader import async_get_integration
 
 from .const import (
     CONF_ARCHIVE_FOLDER,
@@ -111,8 +115,22 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
     async_setup_services(hass)
     hass.http.register_view(BlinkTalkView())
+    await _async_register_card(hass)
 
     return True
+
+
+TALK_CARD_URL = "/blink_plus/blink-plus-talk-card.js"
+
+
+async def _async_register_card(hass: HomeAssistant) -> None:
+    """Serve the talk card and load it on every dashboard (no resource needed)."""
+    path = Path(__file__).parent / "frontend" / "blink-plus-talk-card.js"
+    await hass.http.async_register_static_paths(
+        [StaticPathConfig(TALK_CARD_URL, str(path), cache_headers=False)]
+    )
+    version = (await async_get_integration(hass, DOMAIN)).version
+    add_extra_js_url(hass, f"{TALK_CARD_URL}?v={version}")
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: BlinkConfigEntry) -> bool:

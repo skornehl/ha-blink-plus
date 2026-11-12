@@ -23,6 +23,7 @@ SAMPLE_RATE = 16000
 SAMPLES_PER_FRAME = 1024
 FRAME_SECONDS = SAMPLES_PER_FRAME / SAMPLE_RATE  # 64 ms
 MAX_LAG = 0.5  # s; if we fall further behind real time, restart the clock
+MAX_UPLOAD = 8 * 1024 * 1024  # bytes of non-ADTS audio buffered for ffmpeg
 
 
 class TalkBusyError(Exception):
@@ -31,6 +32,16 @@ class TalkBusyError(Exception):
 
 class AudioFormatError(ValueError):
     """The audio is not AAC-LC, 16 kHz, mono ADTS."""
+
+
+def is_adts(head: bytes) -> bool:
+    """Return True if the data starts with an ADTS sync word (0xFFF).
+
+    The talk endpoint uses this to tell ready ADTS audio (sent as is) from any
+    other format (WebM/Opus from a browser, MP3, WAV ...), which goes through
+    ffmpeg first.
+    """
+    return len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xF0) == 0xF0
 
 
 def split_adts(buf: bytes) -> tuple[list[bytes], bytes]:
