@@ -256,6 +256,9 @@ class _Client:
         self.queue: asyncio.Queue[bytes | None] = asyncio.Queue(CLIENT_QUEUE_CHUNKS)
         self.synced = False
         self.peer = writer.get_extra_info("peername")
+        # A still grab (camera snapshot from a running live view) gets the
+        # video too, but doesn't keep the session alive or wake the camera.
+        self.still = False
 
     def close(self) -> None:
         """Tell the writer loop to stop and close the socket."""
@@ -287,6 +290,10 @@ _ACTIVE_BY_NETWORK: dict[str, "BlinkLiveViewServer"] = {}
 PREEMPT_COOLDOWN = 10  # s a preempted camera refuses to restart on its own
 REST_AFTER_LIMIT = 60  # s a camera rests after hitting the max-minutes limit
 FAIL_COOLDOWN = 120  # s a camera refuses to retry after a failed live view
+# Still grabs (``async_camera_image`` while streaming) connect with this query.
+# Dashboards fetch a still every few seconds; counted as viewers they would
+# keep a live view running until the time limit after everyone had left.
+STILL_QUERY = "still=1"
 
 
 class BlinkLiveViewServer:
@@ -348,6 +355,11 @@ class BlinkLiveViewServer:
         return f"http://{host}:{self.port}/stream.ts"
 
     @property
+    def still_url(self) -> str:
+        """URL for one-frame grabs; such clients never keep a session alive."""
+        return f"{self.url}?{STILL_QUERY}"
+
+    @property
     def active(self) -> bool:
         """Return True while a Blink session is running."""
         return self._session_task is not None and not self._session_task.done()
@@ -382,11 +394,17 @@ class BlinkLiveViewServer:
         self._session_task = None
         self._stop_requested = False
 
+    @property
+    def _viewers(self) -> list[_Client]:
+        """Clients that keep the session alive (everyone but still grabs)."""
+        return [c for c in self._clients if not c.still]
+
     def _changed(self) -> None:
-        self.stats.clients = len(self._clients)
+        viewers = self._viewers
+        self.stats.clients = len(viewers)
         self.stats.extra["cooldown"] = self.blocked_for
         self.stats.extra["viewers"] = sorted(
-            {str(c.peer[0]) if c.peer else "?" for c in self._clients}
+            {str(c.peer[0]) if c.peer else "?" for c in viewers}
         )
         if self.on_change:
             try:
@@ -403,6 +421,17 @@ class BlinkLiveViewServer:
             head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 1.0)
         except (TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError):
             head = b""
+        request_line = head.split(b"\r\n", 1)[0]
+        still = STILL_QUERY.encode() in request_line
+        if still and not self.active:
+            # Never wake a camera for a still; the caller uses the thumbnail.
+            writer.write(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n")
+            try:
+                await writer.drain()
+            except (ConnectionError, OSError):
+                pass
+            writer.close()
+            return
         if head.startswith((b"GET", b"HEAD")):
             writer.write(
                 b"HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n"
@@ -413,10 +442,19 @@ class BlinkLiveViewServer:
                 writer.close()
                 return
         client = _Client(writer)
+        client.still = still
         self._clients.add(client)
-        _LOGGER.debug("%s: client %s connected", self.name, client.peer)
-        self._changed()
+        _LOGGER.debug(
+            "%s: %s %s connected", self.name, "still grab" if still else "client", client.peer
+        )
+        if not still:
+            self._changed()
         if not self.active:
+            if still:
+                # The session ended while we answered: no new one for a still.
+                self._clients.discard(client)
+                client.close()
+                return
             if time.monotonic() < self._blocked_until:
                 # Cool-down (handed to another camera, hit the time limit, or the
                 # last attempt failed): don't send Blink anything, so a player
@@ -456,8 +494,11 @@ class BlinkLiveViewServer:
             self._clients.discard(client)
             if not writer.is_closing():
                 writer.close()
-            _LOGGER.debug("%s: client %s left", self.name, client.peer)
-            self._changed()
+            _LOGGER.debug(
+                "%s: %s %s left", self.name, "still grab" if still else "client", client.peer
+            )
+            if not still:
+                self._changed()
 
     def _broadcast(self, data: bytes) -> None:
         self.stats.bytes_streamed += len(data)
@@ -509,7 +550,7 @@ class BlinkLiveViewServer:
         # Let a clip upload that's already running finish first (max 45 s),
         # instead of colliding with it and getting "system busy".
         waited = 0
-        while self.sync_busy and self.sync_busy() and waited < 45 and self._clients:
+        while self.sync_busy and self.sync_busy() and waited < 45 and self._viewers:
             if waited == 0:
                 self.stats.state = "starting"
                 self._changed()
@@ -521,7 +562,7 @@ class BlinkLiveViewServer:
         started = time.monotonic()
         self.stats.started_at = time.time()
         try:
-            while self._clients and not self._stop_requested:
+            while self._viewers and not self._stop_requested:
                 if self.max_seconds and time.monotonic() - started > self.max_seconds:
                     _LOGGER.info(
                         "%s: live view hit the %d min limit, stopping",
@@ -557,7 +598,7 @@ class BlinkLiveViewServer:
                         FAIL_COOLDOWN,
                     )
                     break
-                if self._clients:
+                if self._viewers:
                     await asyncio.sleep(0.5)
         finally:
             self._release_network()
@@ -623,7 +664,7 @@ class BlinkLiveViewServer:
                     if token is None:
                         self._null_token_works = True
                     break
-                if not self._clients or not self._relay_hung_up:
+                if not self._viewers or not self._relay_hung_up:
                     # Relay kept the connection open but the camera sent
                     # nothing: the token was fine, the camera is the problem.
                     break
@@ -892,11 +933,14 @@ class BlinkLiveViewServer:
                 return
 
     async def _watch_clients(self) -> None:
-        """Return when nobody has been watching for `linger` seconds."""
+        """Return when nobody has been watching for `linger` seconds.
+
+        Still grabs don't count: they only borrow a frame from a running view.
+        """
         idle_since: float | None = None
         while True:
             await asyncio.sleep(1)
-            if self._clients:
+            if self._viewers:
                 idle_since = None
                 continue
             idle_since = idle_since or time.monotonic()

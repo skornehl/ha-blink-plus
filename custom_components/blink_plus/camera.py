@@ -214,14 +214,17 @@ class BlinkCamera(CoordinatorEntity[BlinkUpdateCoordinator], Camera):
         """Return a frame from the live view if one is running, else the thumbnail.
 
         We never start a live view just for a still: that would wake the camera
-        every time Apple Home or a dashboard refreshes.
+        every time Apple Home or a dashboard refreshes. Nor does a still keep a
+        running live view alive: grabs use ``still_url`` and don't count as
+        viewers, so the session ends when the last real viewer leaves.
         """
         if self._live is not None and self._live.stats.state == "streaming":
             try:
                 from homeassistant.components.ffmpeg import async_get_image  # noqa: PLC0415
 
+                # still_url: this grab must not keep the live view running.
                 image = await async_get_image(
-                    self.hass, self._live.url, width=width, height=height
+                    self.hass, self._live.still_url, width=width, height=height
                 )
                 if image:
                     return image

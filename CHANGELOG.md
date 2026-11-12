@@ -2,6 +2,11 @@
 
 All notable changes to Blink Plus. The project follows [Semantic Versioning](https://semver.org/). It's pre-1.0, so options and behaviour may still change between minor versions.
 
+## [Unreleased]
+
+### Fixed
+- **A live view no longer stays open after everyone has left** when dashboards or displays show the camera. While a live view runs, camera stills are taken from it; those grabs counted as viewers, and since cards fetch a still every few seconds, the session ran until the *Max live view minutes* limit and drained the battery. Still grabs now use their own URL (`…/stream.ts?still=1`), don't count as viewers (also not in `live_view_clients` / `live_view_viewers`) and never start a live view.
+
 ## [0.5.3] - 2026-11-12
 
 ### Fixed
