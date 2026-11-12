@@ -2,6 +2,12 @@
 
 All notable changes to Blink Plus. The project follows [Semantic Versioning](https://semver.org/). It's pre-1.0, so options and behaviour may still change between minor versions.
 
+## [Unreleased]
+
+### Added
+- **Talk card** `custom:blink-plus-talk-card`, bundled with the integration and loaded automatically (no dashboard resource): live view with sound and a push-to-talk button for one or more cameras, English and German. Optional URL parameters `?camera=<entity>&live=1` pick a camera and start its live view, e.g. from a doorbell notification.
+- The talk endpoint `POST /api/blink_plus/talk/<entity>` now also takes any audio format ffmpeg reads (WebM/Opus from a browser, MP3, WAV, M4A …). It is transcoded to AAC-LC 16 kHz mono first; ADTS AAC is still played as it arrives.
+
 ## [0.4.0] - 2026-11-11
 
 ### Added

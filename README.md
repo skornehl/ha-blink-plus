@@ -224,7 +224,26 @@ data:
   file_path: /media/sounds/be_right_there.mp3
 ```
 
-**Stream audio** to `POST /api/blink_plus/talk/<camera entity id>`. It needs a Home Assistant login (e.g. a [long-lived access token](https://developers.home-assistant.io/docs/auth_api/#long-lived-access-token)) whose user may control that camera. The body is ADTS AAC: **AAC-LC, 16 kHz, mono**. It can be a whole file or a live stream; Blink Plus plays it in real time.
+**Talk from a dashboard** with the bundled card. It shows the live view with sound and a push-to-talk button (walkie-talkie style: hold, speak, release; the visitor hears you about a second later). It is loaded automatically, no resource needed:
+
+```yaml
+type: custom:blink-plus-talk-card
+title: Front door
+cameras:
+  - entity: camera.front_door
+    name: Front door
+  - camera.driveway
+```
+
+- Press **Live with sound** to open the live view (it doesn't start on its own, so opening the dashboard never wakes a camera). Unmute with the speaker icon in the picture.
+- Browsers only allow the microphone in a **secure context**: open Home Assistant over `https://` (in the Companion app, use the https address at home too). Over plain `http://` the card still shows the live view with sound, but can't record.
+- For a doorbell notification, link to the dashboard view with `?camera=camera.front_door&live=1`: the card picks that camera and starts the live view right away.
+- The recording goes to the endpoint below, so the user needs control permission for the camera, not admin rights.
+
+**Send audio** to `POST /api/blink_plus/talk/<camera entity id>`. It needs a Home Assistant login (e.g. a [long-lived access token](https://developers.home-assistant.io/docs/auth_api/#long-lived-access-token)) whose user may control that camera.
+
+- **ADTS AAC (AAC-LC, 16 kHz, mono)** is played as it arrives, so it can be a live stream.
+- **Any other format** ffmpeg reads (WebM/Opus from a browser recording, MP3, WAV, M4A …) is read completely first (max. 8 MB, 60 s) and then transcoded.
 
 ```bash
 ffmpeg -i message.wav -ac 1 -ar 16000 -c:a aac -b:a 32k -f adts - | \
@@ -235,7 +254,7 @@ ffmpeg -i message.wav -ac 1 -ar 16000 -c:a aac -b:a 32k -f adts - | \
 | Answer | Meaning |
 |---|---|
 | `200` `{"frames": …, "seconds": …}` | Played |
-| `400` | Not AAC-LC 16 kHz mono ADTS, empty, or the upload broke off |
+| `400` | Not readable as audio (or ADTS that isn't AAC-LC 16 kHz mono), empty, larger than 8 MB, or the upload broke off |
 | `403` / `404` | No permission for that camera / not a Blink Plus camera |
 | `408` | Longer than 60 seconds (the rest was cut off) |
 | `409` | Someone else is talking to this camera |
@@ -350,7 +369,7 @@ logger:
 - [ ] **Push notifications** (Firebase, like the app): instant doorbell press events and motion/person/vehicle detection, without polling
 - [x] Clip archive to a folder / PC (cloud and USB)
 - [ ] Snooze, chime test, lights, Mini-as-chime
-- [x] Two-way talk (during live view: `blink_plus.play_audio` and an authenticated audio endpoint)
+- [x] Two-way talk (during live view: `blink_plus.play_audio`, an authenticated audio endpoint and a push-to-talk dashboard card)
 - [ ] Two-way talk from the dashboard (microphone button)
 
 ## Development
