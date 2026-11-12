@@ -14,7 +14,7 @@ from homeassistant.core import (
 from homeassistant.helpers import config_validation as cv, service
 
 from .const import DOMAIN
-from .talk_view import async_handle_play_audio
+from .talk_view import async_handle_play_audio, async_handle_start_live_view
 
 SERVICE_RECORD = "record"
 SERVICE_TRIGGER = "trigger_camera"
@@ -24,6 +24,11 @@ SERVICE_STOP_LIVE_VIEW = "stop_live_view"
 SERVICE_ARCHIVE_CLIPS = "archive_clips"
 SERVICE_RESET_ARCHIVE = "reset_archive"
 SERVICE_PLAY_AUDIO = "play_audio"
+SERVICE_START_LIVE_VIEW = "start_live_view"
+DEFAULT_HOLD_SECONDS = 60
+# The live view time limit (option) is at most 240 min; the hold is cut to
+# each camera's own limit.
+MAX_HOLD_SECONDS = 240 * 60
 
 
 @callback
@@ -82,6 +87,25 @@ def async_setup_services(hass: HomeAssistant) -> None:
         schema=cv.make_entity_service_schema(
             {vol.Required(CONF_FILE_PATH): cv.string}
         ),
+    )
+
+    async def _start_live_view(call: ServiceCall) -> ServiceResponse:
+        return await async_handle_start_live_view(hass, call)
+
+    # Not an entity service either: opening a live view must not wait behind
+    # a running camera.record (or block it).
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_START_LIVE_VIEW,
+        _start_live_view,
+        schema=cv.make_entity_service_schema(
+            {
+                vol.Optional("seconds", default=DEFAULT_HOLD_SECONDS): vol.All(
+                    vol.Coerce(int), vol.Range(min=1, max=MAX_HOLD_SECONDS)
+                )
+            }
+        ),
+        supports_response=SupportsResponse.OPTIONAL,
     )
 
     async def _archive_clips(call: ServiceCall) -> ServiceResponse:

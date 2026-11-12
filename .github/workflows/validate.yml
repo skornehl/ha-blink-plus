@@ -52,6 +52,11 @@ jobs:
           python3 test_immis.py . ../custom_components/blink_plus/immis.py null_only
           python3 test_preempt.py . ../custom_components/blink_plus/immis.py
           python3 test_failure.py . ../custom_components/blink_plus/immis.py
+      - name: start_live_view hold (warm-up before the player)
+        working-directory: tests
+        run: |
+          python3 test_hold.py . ../custom_components/blink_plus/immis.py \
+            ../custom_components/blink_plus/live_hold.py
       - name: Two-way talk
         working-directory: tests
         run: |

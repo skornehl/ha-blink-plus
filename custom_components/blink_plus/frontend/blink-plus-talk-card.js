@@ -11,8 +11,21 @@
  *       name: Front door          # optional
  *     - camera.driveway           # short form
  *
+ *   exoplayer: false             # optional, see below
+ *
  * Optional URL parameters, e.g. for a notification action:
  *   ?camera=camera.front_door&live=1   pick the camera and start the live view
+ *
+ * Live view: the card first wakes the camera with blink_plus.start_live_view
+ * and waits until it streams; only then it attaches the player. A battery
+ * camera needs 5-16 s to wake, and a player that starts cold gives up before
+ * the first HLS segment exists. If the camera is in cool-down (another camera
+ * on the same sync module just took over, or the last try failed), the card
+ * says so and tries again when the cool-down is over, for up to 40 s. If the
+ * player shows no picture 15 s after it was attached, it is recreated once.
+ * The live view plays in the web view (hls.js / WebRTC), not in the Companion
+ * app's native ExoPlayer, so the card can see whether a picture arrived;
+ * exoplayer: true switches back to the native player.
  *
  * Talk works like a walkie-talkie: hold the button, speak, release. The
  * recording (WebM/Opus or whatever the browser records) goes to
@@ -24,6 +37,11 @@ const CARD_VERSION = "0.5.0";
 const MAX_MS = 30000;
 const MIN_MS = 400;
 const LIVE_WAIT_MS = 40000;
+const WARM_MS = 40000; // retries (cool-downs) only within this time
+const WARM_MAX_MS = 90000; // hard limit, even while the server is still starting
+const HOLD_S = 60; // start_live_view keeps the camera awake this long ...
+const HOLD_RENEW_MS = 45000; // ... and the card renews it while it shows the live view
+const PICTURE_MS = 15000; // no picture after this long: recreate the player once
 
 const TEXT = {
   en: {
@@ -34,6 +52,12 @@ const TEXT = {
     talk: "🎙️ Hold to talk",
     talking: "🔴 Talking … release to send",
     connecting: "Connecting …",
+    waking: "Waking the camera …",
+    busy: "Camera busy (another live view on the same sync module), retrying in {n} s",
+    failedRetry: "Live view failed: {e} – retrying in {n} s",
+    busyLater: "Camera busy (another live view on the same sync module) – try again in {n} s",
+    failedLater: "Live view failed: {e} – try again in {n} s",
+    reconnect: "No picture yet – reconnecting the player …",
     streaming: "Live – sound via the speaker icon in the picture",
     micAsk: "Allowing the microphone …",
     micNo: "No microphone access: ",
@@ -55,6 +79,12 @@ const TEXT = {
     talk: "🎙️ Gedrückt halten zum Sprechen",
     talking: "🔴 Spricht … loslassen zum Senden",
     connecting: "Verbinde …",
+    waking: "Kamera wird geweckt …",
+    busy: "Kamera belegt (anderes Live-Bild am selben Sync-Modul), neuer Versuch in {n} s",
+    failedRetry: "Live-Bild fehlgeschlagen: {e} – neuer Versuch in {n} s",
+    busyLater: "Kamera belegt (anderes Live-Bild am selben Sync-Modul) – in {n} s nochmal versuchen",
+    failedLater: "Live-Bild fehlgeschlagen: {e} – in {n} s nochmal versuchen",
+    reconnect: "Noch kein Bild – Player wird neu verbunden …",
     streaming: "Live – Ton über das Lautsprechersymbol im Bild",
     micAsk: "Mikrofon wird freigegeben …",
     micNo: "Kein Mikrofonzugriff: ",
@@ -209,8 +239,12 @@ class BlinkPlusTalkCard extends HTMLElement {
   }
 
   _liveState() {
+    return this._attrs().live_view_state;
+  }
+
+  _attrs() {
     const st = this._hass && this._hass.states[this._cam.entity];
-    return st && st.attributes.live_view_state;
+    return (st && st.attributes) || {};
   }
 
   _updateInfo() {
@@ -223,7 +257,7 @@ class BlinkPlusTalkCard extends HTMLElement {
 
   async _pickCamera(i) {
     if (i === this._idx || this._busy || this._rec) return;
-    const wasLive = !!this._stream;
+    const wasLive = !!this._stream || !!this._starting;
     if (wasLive) await this._hangUp();
     this._idx = i;
     this._mark();
@@ -252,45 +286,187 @@ class BlinkPlusTalkCard extends HTMLElement {
   }
 
   async _liveOn() {
-    if (this._stream || !this._hass) return;
-    const st = this._hass.states[this._cam.entity];
-    if (!st) {
+    if (this._stream || this._starting || !this._hass) return;
+    if (!this._hass.states[this._cam.entity]) {
       this._status(this._t("notFound"));
       return;
     }
+    // Every start, hang-up and camera switch gets a new run number; an older
+    // run that is still waiting just stops.
+    const run = (this._run = (this._run || 0) + 1);
+    this._starting = true;
     this._status(this._t("connecting"));
-    let el;
+    try {
+      if (await this._warmUp(run)) await this._attach(run);
+    } catch (e) {
+      if (run === this._run) this._status(this._t("error") + (e.message || e));
+    } finally {
+      if (run === this._run) this._starting = false;
+    }
+  }
+
+  // Open the live view with blink_plus.start_live_view and wait until it
+  // streams. Returns false (with a message) if it doesn't.
+  async _warmUp(run) {
+    const entity = this._cam.entity;
+    const t0 = Date.now();
+    let next = 0; // when to call start_live_view (again)
+    let wait = null; // { until, err } while the camera is in cool-down
+    while (run === this._run) {
+      const a = this._attrs();
+      if (a.live_view_state === "streaming") return true;
+      // Always once at the start (someone else may have started the live
+      // view; the hold keeps it open for us), then only while not starting.
+      if (Date.now() >= next && (next === 0 || a.live_view_state !== "starting")) {
+        let r;
+        try {
+          r = await this._hold(entity, true);
+        } catch (e) {
+          // Integration without the action (or no permission): let the
+          // player try on its own, as before.
+          console.warn("blink-plus-talk-card: start_live_view failed", e);
+          return run === this._run;
+        }
+        if (run !== this._run) return false;
+        if (r.state === "streaming") return true;
+        if (r.cooldown_s > 0) {
+          const until = Date.now() + r.cooldown_s * 1000 + 500;
+          if (until - t0 > WARM_MS) {
+            const vars = { n: r.cooldown_s, e: r.last_error };
+            this._status(this._t(r.last_error ? "failedLater" : "busyLater", vars));
+            return false;
+          }
+          wait = { until, err: r.last_error };
+          next = until;
+        } else {
+          wait = null;
+          next = Date.now() + 3000; // let the session start before asking again
+        }
+      }
+      const now = Date.now();
+      if (wait && now < wait.until) {
+        // until has 0.5 s of slack on top of the cool-down; don't show it.
+        const vars = { n: Math.max(1, Math.ceil((wait.until - 500 - now) / 1000)), e: wait.err };
+        this._status(this._t(wait.err ? "failedRetry" : "busy", vars));
+      } else {
+        this._status(this._t(a.live_view_state === "starting" ? "waking" : "connecting"));
+      }
+      // Give up after WARM_MS, unless the server is still busy starting (it
+      // has its own time limits); never wait longer than WARM_MAX_MS.
+      const spent = now - t0;
+      if ((spent > WARM_MS && a.live_view_state !== "starting") || spent > WARM_MAX_MS) {
+        this._status(this._t("noLive") + (a.live_view_last_error ? `: ${a.live_view_last_error}` : ""));
+        this._stopLive(entity);
+        return false;
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    return false;
+  }
+
+  // start_live_view for one camera. With answer, returns its status
+  // ({state, cooldown_s, last_error, ...}); falls back to the attributes on
+  // a Home Assistant that can't return action responses.
+  async _hold(entity, answer = false) {
+    const res = await this._hass.callService(
+      "blink_plus", "start_live_view", { seconds: HOLD_S }, { entity_id: entity }, false, answer,
+    );
+    if (!answer) return null;
+    const r = res && res.response && res.response[entity];
+    if (r) return r;
+    const a = this._attrs();
+    return { state: a.live_view_state, cooldown_s: 0, last_error: a.live_view_last_error };
+  }
+
+  async _createStream() {
     if (await this._streamElementReady()) {
-      el = document.createElement("ha-camera-stream");
+      const el = document.createElement("ha-camera-stream");
       el.hass = this._hass;
-      el.stateObj = st;
+      el.stateObj = this._hass.states[this._cam.entity];
       el.controls = true;
       el.muted = false;
-      el.allowExoPlayer = true;
-    } else {
-      const helpers = await window.loadCardHelpers();
-      el = await helpers.createCardElement({
-        type: "picture-entity", entity: this._cam.entity, camera_view: "live", show_name: false, show_state: false,
-      });
-      el.hass = this._hass;
+      // In the web view, not the Companion app's native player: the card can
+      // see whether a picture arrived, and hls.js keeps retrying (see README).
+      el.allowExoPlayer = !!this._config.exoplayer;
+      return el;
     }
+    const helpers = await window.loadCardHelpers();
+    const el = await helpers.createCardElement({
+      type: "picture-entity", entity: this._cam.entity, camera_view: "live", show_name: false, show_state: false,
+    });
+    el.hass = this._hass;
+    return el;
+  }
+
+  // The camera streams: attach the player, keep the camera awake while it is
+  // shown, and recreate the player once if no picture arrives.
+  async _attach(run) {
+    const el = await this._createStream();
+    if (run !== this._run) return;
     this._el.view.innerHTML = "";
     this._el.view.appendChild(el);
     this._stream = el;
+    this._status(this._t("streaming"));
+    const entity = this._cam.entity;
+    clearInterval(this._renew);
+    this._renew = setInterval(() => {
+      if (run !== this._run || !this._stream) return clearInterval(this._renew);
+      this._hold(entity).catch(() => {});
+    }, HOLD_RENEW_MS);
+    if (el.allowExoPlayer) return; // the native player can't be looked into
+    clearTimeout(this._picTimer);
+    this._picTimer = setTimeout(async () => {
+      if (run !== this._run || !this._stream || this._hasPicture(this._stream)) return;
+      this._status(this._t("reconnect"));
+      try {
+        await this._hold(entity).catch(() => {});
+        const again = await this._createStream();
+        if (run !== this._run || !this._stream) return;
+        this._stream.replaceWith(again);
+        this._stream = again;
+        this._status(this._t("streaming"));
+      } catch (e) {
+        if (run === this._run) this._status(this._t("error") + (e.message || e));
+      }
+    }, PICTURE_MS);
+  }
+
+  // A playing <video> (HLS / WebRTC) or a loaded <img> (MJPEG) anywhere
+  // inside the player, through its shadow roots.
+  _hasPicture(root) {
+    const todo = [root];
+    while (todo.length) {
+      const n = todo.pop();
+      if (n.tagName === "VIDEO" && n.readyState >= 2 && n.videoWidth > 0) return true;
+      if (n.tagName === "IMG" && n.complete && n.naturalWidth > 0) return true;
+      if (n.shadowRoot) todo.push(...n.shadowRoot.children);
+      if (n.children) todo.push(...n.children);
+    }
+    return false;
+  }
+
+  _stopTimers() {
+    clearInterval(this._renew);
+    clearTimeout(this._picTimer);
+  }
+
+  _stopLive(entity) {
+    return this._hass.callService("blink_plus", "stop_live_view", { entity_id: entity }).catch(() => {
+      /* already off */
+    });
   }
 
   async _hangUp() {
+    this._run = (this._run || 0) + 1;
+    this._starting = false;
+    this._stopTimers();
     if (this._stream) {
       this._stream.remove();
       this._stream = null;
     }
     this._el.view.innerHTML = `<div class="empty">${this._t("off")}</div>`;
     this._status("");
-    try {
-      await this._hass.callService("blink_plus", "stop_live_view", { entity_id: this._cam.entity });
-    } catch (e) {
-      /* already off */
-    }
+    await this._stopLive(this._cam.entity);
   }
 
   async _press() {
@@ -384,6 +560,11 @@ class BlinkPlusTalkCard extends HTMLElement {
   }
 
   disconnectedCallback() {
+    // Stops a warm-up still running and the renewing; an open live view ends
+    // on its own (the hold runs out, then Home Assistant's player).
+    this._run = (this._run || 0) + 1;
+    this._starting = false;
+    this._stopTimers();
     if (this._rec) this._release();
     if (this._mic) {
       this._mic.getTracks().forEach((t) => t.stop());

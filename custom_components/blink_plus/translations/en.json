@@ -98,6 +98,9 @@
     "integration_not_found": {
       "message": "Integration \"{target}\" not found in registry."
     },
+    "live_no_camera": {
+      "message": "Choose a Blink Plus camera to open its live view."
+    },
     "migration_reauth_required": {
       "message": "Cannot migrate configuration entry from version {version}, re-authentication is required"
     },
@@ -194,6 +197,16 @@
     "stop_live_view": {
       "name": "Stop live view",
       "description": "Ends the Blink live view session for this camera now (saves battery)."
+    },
+    "start_live_view": {
+      "name": "Start live view",
+      "description": "Opens the camera's live view and keeps it open, so a player (dashboard, talk card, go2rtc) or play_audio finds it already running. Ends after the given time, on Stop live view, or at the live view time limit. Starting it again extends it. Returns per camera its state and, if the camera is in cool-down, how many seconds to wait.",
+      "fields": {
+        "seconds": {
+          "name": "Seconds",
+          "description": "How long to keep the live view open (cut to the live view time limit set in the options)."
+        }
+      }
     },
     "archive_clips": {
       "name": "Archive clips",

@@ -22,6 +22,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DEFAULT_BRAND, DOMAIN
 from .coordinator import BlinkConfigEntry, BlinkUpdateCoordinator
 from .immis import BlinkLiveViewServer, live_key
+from .live_hold import async_stop_hold
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -114,8 +115,11 @@ class BlinkCamera(CoordinatorEntity[BlinkUpdateCoordinator], Camera):
 
     async def stop_live_view(self) -> None:
         """End the live view session now (saves battery)."""
-        # Stop HA's own stream worker first, or it would reconnect at once and
-        # start a new Blink session.
+        # Stop whatever keeps it open first (start_live_view's hold, HA's own
+        # stream worker), or it would reconnect at once and start a new Blink
+        # session.
+        if self._live:
+            await async_stop_hold(self._live)
         if self.stream is not None:
             await self.stream.stop()
         if self._live:
