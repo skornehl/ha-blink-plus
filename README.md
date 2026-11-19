@@ -37,7 +37,7 @@ It speaks Blink's own live view protocol (**IMMIS**), reverse engineered from th
 | 🧠 **Sync-module friendly** | One live view per system, no polling during live view, no background USB scans, never retries a failing camera. The Blink app keeps working |
 | 🔐 **Login that works in 2026** | OAuth v2 + PKCE, 2FA (email/SMS), per-install device ID, token refresh, and clear error messages |
 | 📊 **Everything from the built-in integration** | Alarm panel (arm/disarm), motion, battery, temperature, Wi-Fi, motion detection switch, snapshots, clip saving |
-| 💾 **Clip archive** | Copies clips to a folder or straight onto your PC, **with or without a Blink plan** (cloud clips or Sync Module USB clips) |
+| 💾 **Clip archive** | Copies clips to a folder or straight onto your PC, **with or without a Blink plan** (cloud clips or Sync Module USB clips). Can keep the USB stick small by deleting clips that are safely archived |
 | 🩺 **Diagnostics** | Per-camera live view state and the reason for any failure, plus a log of the last 150 Blink API calls |
 | 🖼️ **Proper branding** | Icon and logo show in Home Assistant 2026.3+ |
 
@@ -137,6 +137,7 @@ The share now appears inside Home Assistant as `/media/blink`.
 | Copy USB clips to this folder | `/media/blink` | Empty = archive off |
 | Copy new clips every N minutes | `60` | `0` = only with the button or action |
 | Only copy clips from the last N hours | `24` | For runs after the first one (the first run into a folder always copies everything). `0` = no limit |
+| Delete USB clips older than N days | `0` | `0` = never. See [Keep the USB stick small](#4-optional-keep-the-usb-stick-small) before you turn it on |
 
 Then press **Archive clips now** (on the *Blink Plus* device) for a first run, or wait for the schedule. **The first run into a folder copies everything** on the USB stick and in the cloud. After that only new clips are copied. Changed folders? The new folder gets its own full copy. To copy everything again into the same folder, run `blink_plus.reset_archive`. The **Last archived clip** sensor shows progress, counts, the last file and any error.
 
@@ -151,6 +152,8 @@ Then press **Archive clips now** (on the *Blink Plus* device) for a first run, o
 | `last_error` | Why the last clip or run failed, e.g. `clip 123: download HTTP 500` or `can't write to /media/blink/...` |
 | `next_auto_resume_s` | Seconds until the next automatic resume, empty if none is scheduled |
 | `skipped_clips` | Clips skipped for good after 3 failed runs |
+| `deleted_last_run` / `deleted_total` | USB clips deleted in the last delete run / overall (see below) |
+| `last_delete_error` | Why the last USB delete failed, e.g. `clip 123: delete HTTP 500`; empty after a clean run |
 
 > [!TIP]
 > No subscription? Copying from the USB stick uses the sync module, so the Blink app may briefly say *"system busy"* while a clip is being copied. Running every 60 minutes (or overnight with an automation calling `blink_plus.archive_clips`) keeps that out of your way.
@@ -168,6 +171,38 @@ automation:
         data:
           message: "New {{ trigger.event.data.camera }} clip saved"
 ```
+
+### 4. Optional: keep the USB stick small
+
+Blink Plus can delete old clips from the Sync Module's USB stick once they are safely in the archive. Set **Delete USB clips older than N days** (e.g. `30`): after every complete archive run, clips older than that are deleted from the stick.
+
+> [!WARNING]
+> **Deleting is permanent.** A deleted clip is gone from the USB stick **and from the Blink app**. From then on, the copy in your archive folder is the only one.
+
+A clip is only deleted when it is **provably archived**. All of these must hold, otherwise the clip stays on the stick:
+
+| Check | Why |
+|---|---|
+| Blink Plus remembers copying it **into the current archive folder** | A clip whose copy failed (e.g. Blink answered HTTP 404), that is still waiting for a retry, was skipped for good, or that Blink Plus never saw, is never deleted |
+| The file is still in the archive folder | If the share isn't mounted or the file was removed, nothing is deleted |
+| The file is at least **50 KB** | A real Blink clip is several hundred KB or more; error pages and broken downloads are a few KB. Smaller files don't count as a copy |
+
+**Keep clips in the archive longer than on the USB stick.** If something cleans up your archive folder (a script on your PC, an automation), let it keep clips longer than the USB setting, e.g. **42 days in the archive and 30 on the USB stick**. Otherwise the archive copy is already gone when a clip is due, and that clip stays on the stick for good (Blink Plus never deletes a clip it can't find in the archive).
+
+Deleting uses the sync module like copying, so it is paced the same way: one clip at a time with a pause, never while a live view runs (it stops cleanly if one starts and carries on with the next run), at most 50 clips per run. It runs after the copy, and only after an archive run that completed: not paused by a live view, not ended by an error, and not stopped at the per-run cap or in the middle of the first full copy. Clips Blink Plus deleted are remembered and never tried again. After `blink_plus.reset_archive` nothing is deleted until the clips have been copied into the folder again.
+
+**Try it first with a dry run.** Call the action with `dry_run: true`: it deletes nothing and returns what it would delete, and which clips it keeps and why:
+
+```yaml
+action: blink_plus.delete_usb_clips
+data:
+  older_than_days: 30
+  dry_run: true
+```
+
+The answer lists `deleted` (with `dry_run: true`: would be deleted), `skipped` (each with its `reason`, e.g. `archived file missing: …` or `not archived: copy failed 3 times, skipped for good`), `errors` and `remaining` (left for the next run because of `max_clips`, default 50). Without `dry_run` the same action deletes right away, also with the option set to `0`.
+
+> Clips copied before 0.7.0 have no recorded file path. For those, Blink Plus looks for the file under the name the archive gives it (camera name and time). If you renamed the camera or changed Home Assistant's time zone since, the file isn't found and the clip stays on the stick.
 
 ## Apple Home / Apple TV
 
@@ -386,6 +421,7 @@ After you close a camera in HA, it's released within about **35 seconds** (HA ke
 | `blink_plus.play_audio` | Play an audio file through the camera speaker (`file_path`); only while its live view is open, max. 60 s. Runs alongside other camera actions. See [Two-way talk](#two-way-talk) |
 | `blink_plus.archive_clips` | Copy new clips to the archive folder now (`hours`, `max_clips`); returns a summary |
 | `blink_plus.reset_archive` | Forget what was copied to the current folder; the next run copies everything again |
+| `blink_plus.delete_usb_clips` | Delete USB clips older than `older_than_days` that are safely archived (`dry_run`, `max_clips`); returns deleted, skipped (with reason) and failed clips. **Permanent, also gone from the Blink app.** See [Keep the USB stick small](#4-optional-keep-the-usb-stick-small) |
 | `blink_plus.trigger_camera` | Take a new snapshot (wakes the camera) |
 | `blink_plus.record` | Record a clip |
 | `blink_plus.save_video` | Save the last clip to a file |
@@ -458,6 +494,7 @@ logger:
 - [x] Sync-module protection
 - [ ] **Push notifications** (Firebase, like the app): instant doorbell press events and motion/person/vehicle detection, without polling
 - [x] Clip archive to a folder / PC (cloud and USB)
+- [x] Keep the USB stick small (delete clips once they are safely archived)
 - [ ] Snooze, chime test, lights, Mini-as-chime
 - [x] Two-way talk (during live view: `blink_plus.play_audio`, an authenticated audio endpoint and a push-to-talk dashboard card)
 - [x] Open a live view from an automation (`blink_plus.start_live_view`)
