@@ -2,6 +2,18 @@
 
 All notable changes to Blink Plus. The project follows [Semantic Versioning](https://semver.org/). It's pre-1.0, so options and behaviour may still change between minor versions.
 
+## [0.7.0] - 2026-11-19
+
+### Added
+- **Keep the USB stick small:** new option *Delete USB clips older than N days* (`usb_delete_after_days`, default `0` = off). After every complete archive run, Sync Module USB clips older than that are deleted from the stick, using the same endpoint as blinkpy (`…/local_storage/manifest/{id}/clip/delete/{clip}`, HTTP 200 = deleted). **Deleting is permanent: the clip also disappears from the Blink app.**
+- A clip is only deleted when it is provably archived: Blink Plus remembers copying it into the current archive folder, the file is still there, and it is at least 50 KB (a real clip is several hundred KB; error pages and broken downloads are a few KB). Clips whose copy failed (e.g. HTTP 404), that wait for a retry, were skipped for good or are unknown are never deleted. Deleted clips are remembered and never tried again.
+- `blink_plus.delete_usb_clips` action (`older_than_days` ≥ 1, `dry_run`, `max_clips`, default 50): deletes, or with `dry_run: true` only lists, the clips that are due. Returns `deleted`, `skipped` (with the reason), `errors` and `remaining`.
+- *Last archived clip* sensor: new attributes `deleted_last_run`, `deleted_total` and `last_delete_error`.
+
+### Changed
+- Deleting is paced like copying: one clip at a time with a pause, never during a live view (it stops cleanly if one starts), at most 50 clips per run, retries with backoff, and a run stops after 5 failed clips in a row. It reuses the USB clip list the copy already fetched, so it adds no extra clip list request.
+- The archive now remembers the file path of every USB clip it copies, so deleting can check exactly that file. Clips copied before 0.7.0 are looked up under the name the archive gives them (camera and time).
+
 ## [0.6.0] - 2026-11-12
 
 ### Added
