@@ -187,6 +187,69 @@ async def check_start_live_view(hass, servers):
     await server.async_stop()
 
 
+class FakeArchiver:
+    """The parts of ClipArchiver that delete_usb_clips and the sensor use."""
+
+    folder = "/media/blink"
+
+    def __init__(self):
+        self.listeners = []
+        self.calls = []
+        self.status = {
+            "state": "idle", "last_run": None, "last_result": None,
+            "last_clip_camera": None, "last_clip_path": None, "saved_last_run": 0,
+            "saved_total": 0, "last_error": None, "deleted_last_run": 2,
+            "deleted_total": 7, "last_delete_error": "clip 5: delete HTTP 500",
+        }
+
+    async def async_delete_usb(self, older_than_days, dry_run=False, max_clips=50):
+        self.calls.append((older_than_days, dry_run, max_clips))
+        return {"result": "dry run: would delete 0", "dry_run": dry_run,
+                "deleted": [], "skipped": [], "errors": [], "remaining": 0}
+
+
+async def check_delete_usb_clips(hass):
+    """blink_plus.delete_usb_clips through the registry, and the sensor attributes."""
+    from custom_components.blink_plus.archive_sensor import ClipArchiveSensor  # noqa: PLC0415
+
+    archiver = FakeArchiver()
+    entry = types.SimpleNamespace(
+        title="Blink Plus (test)", entry_id="e1",
+        runtime_data=types.SimpleNamespace(archiver=archiver),
+    )
+    real = hass.config_entries
+    hass.config_entries = MagicMock()
+    hass.config_entries.async_loaded_entries.return_value = [entry]
+
+    async def delete(**data):
+        return await hass.services.async_call(
+            "blink_plus", "delete_usb_clips", data, blocking=True, return_response=True
+        )
+
+    try:
+        resp = await delete(older_than_days=30, dry_run=True)
+        print("delete_usb_clips:", resp)
+        assert resp["Blink Plus (test)"]["dry_run"] is True
+        assert archiver.calls == [(30, True, 50)], archiver.calls
+        await delete(older_than_days="31", max_clips=5)
+        assert archiver.calls[-1] == (31, False, 5), archiver.calls
+        for bad in ({}, {"older_than_days": 0}, {"older_than_days": 30, "max_clips": 0}):
+            try:
+                await delete(**bad)
+                raise AssertionError(f"expected vol.Invalid for {bad}")
+            except vol.Invalid:
+                pass
+        print("delete_usb_clips: bad input rejected")
+        assert len(archiver.calls) == 2
+    finally:
+        hass.config_entries = real
+
+    attrs = ClipArchiveSensor(entry, archiver).extra_state_attributes
+    print("archive sensor:", {k: attrs[k] for k in ("deleted_last_run", "deleted_total", "last_delete_error")})
+    assert attrs["deleted_last_run"] == 2 and attrs["deleted_total"] == 7
+    assert attrs["last_delete_error"] == "clip 5: delete HTTP 500"
+
+
 async def main():
     with tempfile.TemporaryDirectory() as config_dir:
         hass = HomeAssistant(config_dir)
@@ -235,6 +298,9 @@ async def main():
         await check_start_live_view(hass, servers)
         servers = talk_servers
         talk_view.find_live_server = lambda _hass, entity_id: servers.get(entity_id)
+
+        # delete_usb_clips (archive memory faked) and the archive sensor.
+        await check_delete_usb_clips(hass)
 
         # A user without control permission for the camera.
         servers["camera.flur"] = FakeServer()

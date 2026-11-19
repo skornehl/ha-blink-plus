@@ -54,3 +54,6 @@ CONF_ARCHIVE_HOURS = "archive_lookback_hours"
 DEFAULT_ARCHIVE_FOLDER = ""  # empty = archive off
 DEFAULT_ARCHIVE_INTERVAL = 60  # minutes, 0 = only via button/action
 DEFAULT_ARCHIVE_HOURS = 24
+# Delete USB clips older than N days once they are safely archived (0 = off)
+CONF_USB_DELETE_DAYS = "usb_delete_after_days"
+DEFAULT_USB_DELETE_DAYS = 0

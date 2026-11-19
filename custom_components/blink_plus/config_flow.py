@@ -38,6 +38,7 @@ from .const import (
     CONF_STREAM_LINGER,
     CONF_STREAM_MAX_MINUTES,
     CONF_STREAM_TOKEN_MODE,
+    CONF_USB_DELETE_DAYS,
     CONF_USB_MOTION_MINUTES,
     DEFAULT_ARCHIVE_FOLDER,
     DEFAULT_ARCHIVE_HOURS,
@@ -48,6 +49,7 @@ from .const import (
     DEFAULT_STREAM_LINGER,
     DEFAULT_STREAM_MAX_MINUTES,
     DEFAULT_STREAM_TOKEN_MODE,
+    DEFAULT_USB_DELETE_DAYS,
     DEFAULT_USB_MOTION_MINUTES,
     DOMAIN,
     LEGACY_HARDWARE_ID,
@@ -352,6 +354,10 @@ class BlinkOptionsFlow(OptionsFlow):
                         CONF_ARCHIVE_HOURS,
                         default=opts.get(CONF_ARCHIVE_HOURS, DEFAULT_ARCHIVE_HOURS),
                     ): vol.All(vol.Coerce(int), vol.Range(min=0, max=8760)),
+                    vol.Required(
+                        CONF_USB_DELETE_DAYS,
+                        default=opts.get(CONF_USB_DELETE_DAYS, DEFAULT_USB_DELETE_DAYS),
+                    ): vol.All(vol.Coerce(int), vol.Range(min=0, max=3650)),
                 }
             ),
         )
