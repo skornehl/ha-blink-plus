@@ -53,4 +53,7 @@ class ClipArchiveSensor(SensorEntity):
             "last_error": st["last_error"],
             "next_auto_resume_s": st.get("next_auto_resume_s"),
             "skipped_clips": st.get("skipped_clips", 0),
+            "deleted_last_run": st.get("deleted_last_run", 0),
+            "deleted_total": st.get("deleted_total", 0),
+            "last_delete_error": st.get("last_delete_error"),
         }

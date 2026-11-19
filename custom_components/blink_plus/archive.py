@@ -24,11 +24,21 @@ Every step occupies the sync module, so the archiver:
 * never runs while a live view is active, and stops at once if one starts
 * remembers which clips it already saved, so they aren't fetched twice
 * caps the number of clips per run
+
+C. Deleting old USB clips (option usb_delete_after_days / delete_usb_clips).
+   Same endpoint blinkpy uses (LocalStorageMediaItem.delete_video):
+   POST .../local_storage/manifest/{manifest_id}/clip/delete/{clip_id}
+        -> HTTP 200 = deleted (also gone from the Blink app)
+   A clip is only deleted when it is provably archived: the archive memory
+   says it was saved, the file is still in the folder and it is at least
+   MIN_ARCHIVED_BYTES big. Same pacing as the copy (one clip at a time,
+   pause, never during a live view, cap per run).
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import timedelta
 import logging
 from pathlib import Path
@@ -59,9 +69,22 @@ RESUME_AFTER_CAP = 30  # s, more clips waiting
 MAX_AUTO_RESUMES = 12  # in a row without progress
 MAX_CLIP_ATTEMPTS = 3  # runs a clip may fail before it is skipped for good
 
+# Deleting archived clips from the USB stick
+# A real Blink clip is at least several hundred KB (the shortest clip is a few
+# seconds of H.264 video). Error pages, JSON answers and cut-off downloads are a
+# few KB at most. Anything smaller than this doesn't count as a safe copy.
+MIN_ARCHIVED_BYTES = 50 * 1024
+DELETE_RETRIES = 3  # attempts per clip, with backoff (3 s, 6 s)
+DELETE_MAX_CLIPS = 50  # delete attempts per run
+MAX_DAYS = 3650
+
 CLIP_URL = string.Template(
     "/api/v1/accounts/$account_id/networks/$network_id/sync_modules/$sync_id"
     "/local_storage/manifest/$manifest_id/clip/request/$clip_id"
+)
+DELETE_URL = string.Template(
+    "/api/v1/accounts/$account_id/networks/$network_id/sync_modules/$sync_id"
+    "/local_storage/manifest/$manifest_id/clip/delete/$clip_id"
 )
 
 
@@ -95,9 +118,21 @@ class ClipArchiver:
             "saved_total": 0,
             "last_error": None,
             "next_auto_resume_s": None,
+            "deleted_last_run": 0,
+            "deleted_total": 0,
+            "last_delete_error": None,
         }
         self.listeners: list = []
         self.enabled = True
+        # Option usb_delete_after_days: after each run, delete archived USB clips
+        # older than this many days (0 = off).
+        self.delete_after_days = 0
+        # Per sync id: clip id -> file path relative to the folder (USB clips
+        # saved from 0.7.0 on), and the clips deleted from the USB stick.
+        self._paths: dict[str, dict[str, str]] = {}
+        self._deleted: dict[str, list[int]] = {}
+        # USB clip lists fetched in the current run, per sync id
+        self._manifests: dict[str, tuple[Any, list[dict[str, Any]]]] = {}
         self._run_saved = 0
         self.usb_busy = False  # True while the sync module is uploading a clip for us
         self._clip_error = ""
@@ -133,23 +168,41 @@ class ClipArchiver:
             for k, v in mine.get("failures", {}).items()
         }
         self.status["skipped_clips"] = self._skipped_count()
+        self._paths = {
+            k: {str(c): str(p) for c, p in v.items()}
+            for k, v in mine.get("paths", {}).items()
+        }
+        self._deleted = {k: list(v) for k, v in mine.get("deleted", {}).items()}
+        self.status["deleted_total"] = int(mine.get("deleted_total", 0))
 
     async def _async_save_store(self) -> None:
+        saved = {k: v[-MAX_REMEMBERED:] for k, v in self._saved.items()}
+        # Keep file paths only for clips that are still remembered.
+        for key, paths in self._paths.items():
+            keep = {str(cid) for cid in saved.get(key, [])}
+            self._paths[key] = {c: p for c, p in paths.items() if c in keep}
         self._all[self.folder] = {
-            "saved": {k: v[-MAX_REMEMBERED:] for k, v in self._saved.items()},
+            "saved": saved,
             "saved_total": self.status["saved_total"],
             "initial_done": self._initial_done,
             "failures": self._failures,
+            "paths": self._paths,
+            "deleted": {k: v[-MAX_REMEMBERED:] for k, v in self._deleted.items()},
+            "deleted_total": self.status["deleted_total"],
         }
         await self._store.async_save({"folders": self._all})
 
     async def async_reset(self) -> None:
-        """Forget what was copied to this folder (next run copies again)."""
+        """Forget what was copied to this folder (next run copies again).
+
+        What was deleted from the USB stick is kept: those clips are gone.
+        """
         if self._lock.locked():
             raise RuntimeError("archive is running, try again when it's done")
         self.cancel_resume()
         self._saved = {}
         self._failures = {}
+        self._paths = {}
         self._initial_done = False
         self.status.update(saved_total=0, skipped_clips=0, last_clip=None, last_clip_path=None,
                            last_clip_camera=None, last_result="memory reset")
@@ -216,6 +269,7 @@ class ClipArchiver:
             kind = "done"  # done | more | paused | error | fatal
             self._run_saved = 0
             self._run_failed = 0
+            self._manifests = {}
             full_copy = not self._initial_done
             if full_copy:
                 # First run into this folder: everything on the drive / in the
@@ -285,8 +339,18 @@ class ClipArchiver:
                 await self._async_save_store()
                 self._notify()
             _LOGGER.info("Blink clip archive: %s, %d clip(s) saved", result, saved)
+            summary: dict[str, Any] = {"result": result, "saved": saved}
+            if self.delete_after_days > 0 and kind == "done" and self.enabled:
+                # Free the USB stick: delete clips that are safely archived.
+                # Only after a complete run (not paused, no error, nothing
+                # waiting), so the copy always goes first.
+                deleted = await self._async_delete_usb(
+                    self.delete_after_days, dry_run=False, max_clips=DELETE_MAX_CLIPS
+                )
+                summary["usb_delete"] = deleted["result"]
+                summary["deleted"] = len(deleted["deleted"])
             self._schedule_resume(kind, saved, hours, max_clips)
-            return {"result": result, "saved": saved}
+            return summary
 
     def _schedule_resume(self, kind: str, saved: int, hours, max_clips) -> None:
         """Carry on by itself after a pause, an error, or the per-run cap."""
@@ -396,6 +460,12 @@ class ClipArchiver:
 
     def _record_saved(self, key: str, cid: int, camera: str, created, path: Path) -> None:
         self._saved.setdefault(key, []).append(cid)
+        if key != "cloud":
+            # Remember where the copy is: deleting the USB clip later checks it.
+            with contextlib.suppress(ValueError):
+                self._paths.setdefault(key, {})[str(cid)] = str(
+                    Path(path).relative_to(self.folder)
+                )
         self._run_saved += 1
         self.status.update(
             last_clip=created.isoformat(),
@@ -428,15 +498,26 @@ class ClipArchiver:
             await asyncio.sleep(3 * (attempt + 1))
         raise RuntimeError("the Sync Module didn't return the USB clip list")
 
+    async def _usb_manifest(self, sync, refresh: bool = False) -> tuple[Any, list[dict[str, Any]]]:
+        """The USB clip list of this run (fetched once, shared by copy and delete)."""
+        key = str(sync.sync_id)
+        if refresh or key not in self._manifests:
+            self.usb_busy = True
+            try:
+                self._manifests[key] = await self._manifest(sync)
+            finally:
+                self.usb_busy = False
+        return self._manifests[key]
+
+    @staticmethod
+    def _camera(sync, clip: dict[str, Any]) -> str:
+        names = getattr(sync, "_names_table", {}) or {}
+        return names.get(clip.get("camera_name"), clip.get("camera_name", "camera"))
+
     async def _archive_sync(self, sync, hours: float, budget: int) -> int:
         if budget <= 0:
             return 0
-        self.usb_busy = True
-        try:
-            manifest_id, clips = await self._manifest(sync)
-        finally:
-            self.usb_busy = False
-        names = getattr(sync, "_names_table", {}) or {}
+        manifest_id, clips = await self._usb_manifest(sync)
         key = str(sync.sync_id)
         done = set(self._saved.get(key, []))
         cutoff = dt_util.utcnow() - timedelta(hours=hours) if hours else None
@@ -454,8 +535,7 @@ class ClipArchiver:
                 created = created.replace(tzinfo=dt_util.UTC)
             if cutoff and created < cutoff:
                 continue
-            camera = names.get(clip.get("camera_name"), clip.get("camera_name", "camera"))
-            todo.append((created, cid, camera))
+            todo.append((created, cid, self._camera(sync, clip)))
         # Oldest first, but clips that failed in earlier runs go last, so a few
         # broken clips at the front can't block newer ones forever.
         todo.sort(key=lambda t: (self._fail_count(key, t[1]), t[0]))
@@ -489,14 +569,11 @@ class ClipArchiver:
                 if fails == 2:
                     # Blink's clip list can expire during a long copy: get a new one.
                     _LOGGER.debug("Refreshing the USB clip list")
-                    self.usb_busy = True
                     try:
-                        manifest_id, _ = await self._manifest(sync)
+                        manifest_id, _ = await self._usb_manifest(sync, refresh=True)
                     except Exception as err:  # noqa: BLE001
                         # Keep going with the old list rather than ending the run.
                         _LOGGER.debug("Could not refresh the USB clip list: %s", err)
-                    finally:
-                        self.usb_busy = False
                 await asyncio.sleep(PAUSE_BETWEEN_CLIPS * 3)
                 continue
             fails = 0
@@ -525,13 +602,18 @@ class ClipArchiver:
 
         return await self._fetch_to_file(url, camera, created, clip_id)
 
-    async def _fetch_to_file(self, url: str, camera: str, created, clip_id) -> Path | None:
+    def _clip_paths(self, camera: str, created, clip_id) -> tuple[Path, Path]:
+        """Where a clip is saved: <camera>_<time>.mp4, or ..._<clip id>.mp4 if taken."""
         local = dt_util.as_local(created)
         cam = _safe(camera)
         folder = Path(self.folder) / cam / local.strftime("%Y-%m-%d")
-        path = folder / f"{cam}_{local.strftime('%Y-%m-%d_%H-%M-%S')}.mp4"
+        stem = f"{cam}_{local.strftime('%Y-%m-%d_%H-%M-%S')}"
+        return folder / f"{stem}.mp4", folder / f"{stem}_{clip_id}.mp4"
+
+    async def _fetch_to_file(self, url: str, camera: str, created, clip_id) -> Path | None:
+        path, with_id = self._clip_paths(camera, created, clip_id)
         if await self.hass.async_add_executor_job(path.exists):
-            path = folder / f"{cam}_{local.strftime('%Y-%m-%d_%H-%M-%S')}_{clip_id}.mp4"
+            path = with_id
         for attempt in range(DOWNLOAD_RETRIES):
             response = await blink_api.http_get(
                 self.blink, url, json=False, timeout=DOWNLOAD_TIMEOUT
@@ -555,6 +637,248 @@ class ClipArchiver:
             await asyncio.sleep(3 * (attempt + 1))
         _LOGGER.warning("Could not download clip %s from %s", clip_id, camera)
         return None
+
+    # ------------------------------------------------------ USB clip delete
+    async def async_delete_usb(
+        self, older_than_days: int, dry_run: bool = False, max_clips: int = DELETE_MAX_CLIPS
+    ) -> dict[str, Any]:
+        """Delete archived USB clips older than `older_than_days` (action)."""
+        if not self.enabled:
+            return {"result": "disabled", "error": self.status["last_error"]}
+        if self._lock.locked():
+            return {"result": "already running"}
+        async with self._lock:
+            self._manifests = {}
+            return await self._async_delete_usb(older_than_days, dry_run, max_clips)
+
+    async def _async_delete_usb(
+        self, older_than_days: int, dry_run: bool, max_clips: int
+    ) -> dict[str, Any]:
+        """Delete (or with dry_run only list) provably archived old USB clips.
+
+        Runs under the archive lock: copy and delete never overlap.
+        """
+        report: dict[str, Any] = {
+            "result": "done",
+            "dry_run": dry_run,
+            "older_than_days": older_than_days,
+            "deleted": [],
+            "skipped": [],
+            "errors": [],
+            "remaining": 0,
+        }
+        if not 1 <= int(older_than_days) <= MAX_DAYS:
+            report["result"] = f"error: older_than_days must be 1 to {MAX_DAYS}"
+            return report
+        syncs = self._local_storage_syncs()
+        if not syncs:
+            report["result"] = "nothing to do: no Sync Module with active USB storage"
+            return report
+        if self._live_active():
+            report["result"] = "skipped: live view running"
+            return report
+        if not dry_run:
+            self.status.update(deleted_last_run=0, last_delete_error=None)
+        self.status["state"] = "deleting old USB clips" + (" (dry run)" if dry_run else "")
+        self._notify()
+        error = None
+        try:
+            budget = max(int(max_clips), 1)
+            for sync in syncs:
+                budget -= await self._delete_sync(
+                    sync, int(older_than_days), dry_run, budget, report
+                )
+            verb = "would delete" if dry_run else "deleted"
+            report["result"] = (
+                f"{'dry run' if dry_run else 'done'}: {verb} {len(report['deleted'])}, "
+                f"skipped {len(report['skipped'])} (not safely archived), "
+                f"{len(report['errors'])} error(s)"
+            )
+            if report["remaining"]:
+                report["result"] += f", {report['remaining']} more next run"
+        except _LiveViewStarted:
+            report["result"] = "paused: a live view started"
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Deleting USB clips failed: %s", err, exc_info=True)
+            error = str(err) or type(err).__name__
+            report["result"] = "error"
+            report["error"] = error
+        finally:
+            self.status["state"] = "idle"
+            if not dry_run:
+                self.status["deleted_last_run"] = len(report["deleted"])
+                if error:
+                    self.status["last_delete_error"] = error
+                await self._async_save_store()
+            self._notify()
+        _LOGGER.info("Blink USB clip delete: %s", report["result"])
+        return report
+
+    async def _delete_sync(
+        self, sync, older_than_days: int, dry_run: bool, budget: int, report: dict[str, Any]
+    ) -> int:
+        """Delete due clips on one sync module. Returns the delete attempts used."""
+        if budget <= 0:
+            return 0
+        manifest_id, clips = await self._usb_manifest(sync)
+        key = str(sync.sync_id)
+        saved = set(self._saved.get(key, []))
+        gone = set(self._deleted.get(key, []))
+        cutoff = dt_util.utcnow() - timedelta(days=older_than_days)
+
+        due = []
+        for clip in clips:
+            try:
+                cid = int(clip["id"])
+                created = dt_util.parse_datetime(str(clip["created_at"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if created is None:
+                continue
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=dt_util.UTC)
+            if created >= cutoff:
+                continue  # too young
+            if cid in gone:
+                # Deleted before (Blink may list it a little longer): never again.
+                _LOGGER.debug("USB clip %s was deleted before, not retried", cid)
+                continue
+            camera = self._camera(sync, clip)
+            item = {
+                "sync_module": sync.name,
+                "clip_id": cid,
+                "camera": camera,
+                "created_at": created.isoformat(),
+            }
+            path, reason = await self._archived_file(key, cid, camera, created, saved)
+            if path is None:
+                report["skipped"].append({**item, "reason": reason})
+                _LOGGER.debug("USB clip %s (%s) kept: %s", cid, camera, reason)
+                continue
+            due.append((created, cid, {**item, "path": str(path)}))
+        due.sort(key=lambda t: t[0])  # oldest first
+        todo = due[:budget]
+        report["remaining"] += len(due) - len(todo)
+        if dry_run:
+            report["deleted"].extend(item for _, _, item in todo)
+            return len(todo)
+
+        used = 0
+        fails = 0
+        for _created, cid, item in todo:
+            if self._live_active():
+                raise _LiveViewStarted
+            used += 1
+            error = await self._delete_clip(sync, manifest_id, cid)
+            if error is None:
+                fails = 0
+                self._deleted.setdefault(key, []).append(cid)
+                self._paths.get(key, {}).pop(str(cid), None)
+                self.status["deleted_total"] += 1
+                report["deleted"].append(item)
+                _LOGGER.info(
+                    "Deleted USB clip %s (%s, %s), archived as %s",
+                    cid, item["camera"], item["created_at"], item["path"],
+                )
+                await self._async_save_store()
+                self._notify()
+                await asyncio.sleep(PAUSE_BETWEEN_CLIPS)
+                continue
+            fails += 1
+            report["errors"].append({**item, "error": error})
+            self.status["last_delete_error"] = f"clip {cid}: {error}"
+            self._notify()
+            _LOGGER.warning(
+                "USB clip %s from %s not deleted (%s), %d failed in a row",
+                cid, item["camera"], error, fails,
+            )
+            if fails >= MAX_FAILS_IN_A_ROW:
+                raise RuntimeError(f"{fails} deletes in a row failed, last: {error}")
+            if fails == 2:
+                # The clip list may have expired (e.g. after a long copy).
+                try:
+                    manifest_id, _ = await self._usb_manifest(sync, refresh=True)
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.debug("Could not refresh the USB clip list: %s", err)
+            await asyncio.sleep(PAUSE_BETWEEN_CLIPS * 3)
+        return used
+
+    async def _archived_file(
+        self, key: str, cid: int, camera: str, created, saved: set[int]
+    ) -> tuple[Path | None, str]:
+        """(path, "") if the clip is provably archived, else (None, reason).
+
+        Provably archived = the archive memory says it was saved, the file is
+        in the folder, and it is at least MIN_ARCHIVED_BYTES big.
+        """
+        if cid not in saved:
+            fails = self._fail_count(key, cid)
+            if fails >= MAX_CLIP_ATTEMPTS:
+                return None, f"not archived: copy failed {fails} times, skipped for good"
+            if fails:
+                return None, f"not archived yet: copy failed {fails} time(s), will retry"
+            return None, "not archived: not in the archive memory of this folder"
+        recorded = self._paths.get(key, {}).get(str(cid))
+        if recorded:
+            candidates = [Path(self.folder) / recorded]
+        else:
+            # Saved before 0.7.0 (no path recorded): the name the archiver
+            # gives it. Renamed camera / changed time zone -> not found -> kept.
+            plain, with_id = self._clip_paths(camera, created, cid)
+            candidates = [with_id, plain]
+        path, size = await self.hass.async_add_executor_job(_first_file, candidates)
+        if path is None:
+            return None, f"archived file missing: {candidates[-1]}"
+        if size < MIN_ARCHIVED_BYTES:
+            return None, (
+                f"archived file too small ({size} bytes, at least "
+                f"{MIN_ARCHIVED_BYTES} expected): {path}"
+            )
+        return path, ""
+
+    async def _delete_clip(self, sync, manifest_id, clip_id) -> str | None:
+        """Delete one clip on the USB stick. None if done, else the error."""
+        url = self.blink.urls.base_url + DELETE_URL.substitute(
+            account_id=self.blink.account_id,
+            network_id=sync.network_id,
+            sync_id=sync.sync_id,
+            manifest_id=manifest_id,
+            clip_id=clip_id,
+        )
+        error = "no response from Blink"
+        for attempt in range(DELETE_RETRIES):
+            if attempt:
+                await asyncio.sleep(3 * 2 ** (attempt - 1))
+                if self._live_active():
+                    raise _LiveViewStarted
+            self.usb_busy = True
+            try:
+                response = await blink_api.http_post(self.blink, url, json=False)
+            except Exception as err:  # noqa: BLE001
+                error = f"{type(err).__name__}: {err}"
+                continue
+            finally:
+                self.usb_busy = False
+            status = getattr(response, "status", None)
+            body = ""
+            with contextlib.suppress(Exception):
+                body = (await response.text())[:200]
+            _LOGGER.debug("Delete USB clip %s -> HTTP %s %s", clip_id, status, body)
+            if status == 200:
+                return None
+            error = f"delete HTTP {status}" if status else "no response from Blink"
+        return error
+
+
+def _first_file(paths: list[Path]) -> tuple[Path | None, int]:
+    """The first of `paths` that is a file, and its size."""
+    for path in paths:
+        try:
+            if path.is_file():
+                return path, path.stat().st_size
+        except OSError:
+            continue
+    return None, 0
 
 
 class _LiveViewStarted(Exception):

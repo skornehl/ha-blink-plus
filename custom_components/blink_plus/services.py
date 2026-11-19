@@ -13,6 +13,7 @@ from homeassistant.core import (
 )
 from homeassistant.helpers import config_validation as cv, service
 
+from .archive import DELETE_MAX_CLIPS, MAX_DAYS
 from .const import DOMAIN
 from .talk_view import async_handle_play_audio, async_handle_start_live_view
 
@@ -25,6 +26,7 @@ SERVICE_ARCHIVE_CLIPS = "archive_clips"
 SERVICE_RESET_ARCHIVE = "reset_archive"
 SERVICE_PLAY_AUDIO = "play_audio"
 SERVICE_START_LIVE_VIEW = "start_live_view"
+SERVICE_DELETE_USB_CLIPS = "delete_usb_clips"
 DEFAULT_HOLD_SECONDS = 60
 # The live view time limit (option) is at most 240 min; the hold is cut to
 # each camera's own limit.
@@ -147,3 +149,36 @@ def async_setup_services(hass: HomeAssistant) -> None:
                 await archiver.async_reset()
 
     hass.services.async_register(DOMAIN, SERVICE_RESET_ARCHIVE, _reset_archive)
+
+    async def _delete_usb_clips(call: ServiceCall) -> ServiceResponse:
+        """Delete safely archived USB clips older than N days (or only list them)."""
+        results = {}
+        for entry in hass.config_entries.async_loaded_entries(DOMAIN):
+            archiver = getattr(entry.runtime_data, "archiver", None)
+            if archiver is None:
+                results[entry.title] = {"result": "archive folder not set (Options)"}
+                continue
+            results[entry.title] = await archiver.async_delete_usb(
+                older_than_days=int(call.data["older_than_days"]),
+                dry_run=bool(call.data.get("dry_run", False)),
+                max_clips=int(call.data.get("max_clips", DELETE_MAX_CLIPS)),
+            )
+        return results
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_DELETE_USB_CLIPS,
+        _delete_usb_clips,
+        schema=vol.Schema(
+            {
+                vol.Required("older_than_days"): vol.All(
+                    vol.Coerce(int), vol.Range(min=1, max=MAX_DAYS)
+                ),
+                vol.Optional("dry_run", default=False): cv.boolean,
+                vol.Optional("max_clips", default=DELETE_MAX_CLIPS): vol.All(
+                    vol.Coerce(int), vol.Range(min=1, max=500)
+                ),
+            }
+        ),
+        supports_response=SupportsResponse.OPTIONAL,
+    )

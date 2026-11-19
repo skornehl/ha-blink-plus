@@ -28,6 +28,7 @@ from .const import (
     CONF_STREAM_LINGER,
     CONF_STREAM_MAX_MINUTES,
     CONF_STREAM_TOKEN_MODE,
+    CONF_USB_DELETE_DAYS,
     CONF_USB_MOTION_MINUTES,
     DEFAULT_ARCHIVE_FOLDER,
     DEFAULT_ARCHIVE_HOURS,
@@ -38,6 +39,7 @@ from .const import (
     DEFAULT_STREAM_LINGER,
     DEFAULT_STREAM_MAX_MINUTES,
     DEFAULT_STREAM_TOKEN_MODE,
+    DEFAULT_USB_DELETE_DAYS,
     DEFAULT_USB_MOTION_MINUTES,
     DOMAIN,
     LEGACY_HARDWARE_ID,
@@ -190,6 +192,9 @@ async def _async_setup_archive(
     if not folder:
         return
     archiver = ClipArchiver(hass, coordinator, entry.entry_id, folder)
+    archiver.delete_after_days = int(
+        entry.options.get(CONF_USB_DELETE_DAYS, DEFAULT_USB_DELETE_DAYS)
+    )
     await archiver.async_load()
     coordinator.archiver = archiver
     # Unload: no new runs and no pending resume. A run still in progress

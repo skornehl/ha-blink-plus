@@ -44,6 +44,9 @@
     "reset_archive": {
       "service": "mdi:folder-refresh"
     },
+    "delete_usb_clips": {
+      "service": "mdi:delete-sweep"
+    },
     "play_audio": {
       "service": "mdi:account-voice"
     }

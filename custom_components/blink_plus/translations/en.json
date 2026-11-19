@@ -160,7 +160,8 @@
           "usb_motion_minutes": "Check the USB clip list for motion every N minutes (0 = never; any other value can make the Blink app show 'system busy' while it runs)",
           "archive_folder": "Copy USB clips to this folder (empty = off). Use /media/... \u2013 e.g. a PC share added under Settings \u2192 System \u2192 Storage",
           "archive_interval_minutes": "Copy new clips every N minutes (0 = only with the button / action)",
-          "archive_lookback_hours": "Only copy clips from the last N hours (after the first run, which always copies everything; 0 = no limit)"
+          "archive_lookback_hours": "Only copy clips from the last N hours (after the first run, which always copies everything; 0 = no limit)",
+          "usb_delete_after_days": "Delete USB clips older than N days after each run, but only clips safely in the archive folder (0 = never). Permanent: they also disappear from the Blink app"
         }
       }
     }
@@ -225,6 +226,24 @@
     "reset_archive": {
       "name": "Reset clip archive",
       "description": "Forgets which clips were already copied to the current archive folder, so the next run copies them again (within the look-back window)."
+    },
+    "delete_usb_clips": {
+      "name": "Delete old USB clips",
+      "description": "Deletes clips older than N days from the Sync Module USB drive, but only clips that are safely in the archive folder (remembered as copied, file present, plausible size). Deleting is permanent: the clips also disappear from the Blink app. Never runs during a live view and pauses if one starts. Returns the deleted, skipped (with reason) and failed clips.",
+      "fields": {
+        "older_than_days": {
+          "name": "Older than (days)",
+          "description": "Only clips recorded more than this many days ago."
+        },
+        "dry_run": {
+          "name": "Dry run",
+          "description": "Only list what would be deleted; nothing is deleted."
+        },
+        "max_clips": {
+          "name": "Max clips",
+          "description": "Delete at most this many clips per call; the rest are deleted next time."
+        }
+      }
     },
     "play_audio": {
       "name": "Play audio",
